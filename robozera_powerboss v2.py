@@ -34,6 +34,7 @@ class IQFimatheBot:
         self.last_candles = {}
         self.custom_assets = {}
         self.martingale_status = {}
+        self.market_status = {}  # Salva o status anterior do mercado para cada ativo
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -69,7 +70,9 @@ class IQFimatheBot:
         self.conta_combobox.current(0)
         self.conta_combobox.grid(row=0, column=5, sticky="w", padx=5)
         self.connect_button = ttk.Button(conn_frame, text="Conectar", command=self.conectar)
-        self.connect_button.grid(row=0, column=6, padx=10)
+        self.connect_button.grid(row=0, column=6, padx=(10, 2))
+        self.disconnect_button = ttk.Button(conn_frame, text="Desconectar", command=self.desconectar, state=tk.DISABLED)
+        self.disconnect_button.grid(row=0, column=7, padx=(2, 10))
 
         # Configuração
         config_frame = ttk.LabelFrame(main_frame, text=" Configurações ", padding="10")
@@ -200,7 +203,19 @@ class IQFimatheBot:
             return self.api.check_connect()
         return False
 
-    # ---------------- POWER BOSS ADX LOGIC -----------------
+    def desconectar(self):
+        if self.api:
+            try:
+                self.api.close()  # Fecha a conexão (se a API possuir esse método)
+            except Exception:
+                pass
+        self.api = None
+        self.connected = False
+        self.status_label.config(text="Desconectado", foreground="red")
+        self.connect_button.config(state=tk.NORMAL)
+        self.disconnect_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.DISABLED)
+        self.log("Desconectado da corretora.")
 
     def compute_adx(self, candles, length=14):
         highs = np.array([c['max'] for c in candles])
@@ -238,9 +253,7 @@ class IQFimatheBot:
                 dxs.append(abs(plus_di[j] - minus_di[j]) / den * 100 if den != 0 else 0)
             adx[i] = np.mean(dxs)
         adx_val = adx[-1] if len(adx) > 0 else 0
-        plus_di_val = plus_di[-1] if len(plus_di) > 0 else 0
-        minus_di_val = minus_di[-1] if len(minus_di) > 0 else 0
-        return adx_val, plus_di_val, minus_di_val
+        return adx_val
 
     def is_doji(self, c):
         corpo = abs(c['close'] - c['open'])
@@ -285,17 +298,24 @@ class IQFimatheBot:
             candles = sorted(candles, key=lambda x: x['from'])
             adx_len = 14
             adx_thresh = 25.0
-            adx_val, plus_di, minus_di = self.compute_adx(candles, length=adx_len)
-            if adx_val >= adx_thresh:
-                return None  # mercado forte, ignora
+            adx_val = self.compute_adx(candles, length=adx_len)
 
-            # Determinar a tendência dominante pelo DI
-            if plus_di > minus_di:
-                tendencia = "up"
-            elif minus_di > plus_di:
-                tendencia = "down"
+            # --- LOG DE STATUS DE MERCADO (INÍCIO) ---
+            prev_status = self.market_status.get(ativo)
+            if adx_val >= adx_thresh:
+                new_status = "trend"
             else:
-                tendencia = "flat"
+                new_status = "consolidated"
+            if prev_status != new_status:
+                if new_status == "trend":
+                    self.log(f"{ativo}: Mercado em tendência forte (ADX={adx_val:.2f}) - NÃO operável.")
+                else:
+                    self.log(f"{ativo}: Mercado consolidado (ADX={adx_val:.2f}) - Operável.")
+                self.market_status[ativo] = new_status
+            # --- LOG DE STATUS DE MERCADO (FIM) ---
+
+            if adx_val >= adx_thresh:
+                return None
 
             last_bar = self.last_signal_bar.get(ativo, -100)
             current_bar = candles[-1]['from'] // 60
@@ -303,11 +323,23 @@ class IQFimatheBot:
                 return None
 
             last6 = candles[-6:]
-            if any(self.is_doji(c) for c in last6):
-                return None
-
             up = sum(1 for c in last6 if c['close'] > c['open'])
             down = sum(1 for c in last6 if c['close'] < c['open'])
+            doji_indexes = [i for i, c in enumerate(last6) if self.is_doji(c)]
+
+            msg_velas = f"{ativo}: Velas analisadas - Altas: {up}, Baixas: {down}."
+            if doji_indexes:
+                msg_velas += f" Encontrado doji na(s) vela(s): {', '.join(str(i+1) for i in doji_indexes)}. NÃO operável."
+                self.log(msg_velas)
+                return None
+            elif up == down:
+                msg_velas += " Empate de velas. NÃO operável."
+                self.log(msg_velas)
+                return None
+            else:
+                direction = 1 if up > down else -1 if down > up else self.check_tiebreaker(last6)
+                msg_velas += f" Sinal detectado: {'CALL' if direction == 1 else 'PUT' if direction == -1 else 'NENHUM'}."
+                self.log(msg_velas)
 
             direction = 0
             if up > down:
@@ -317,19 +349,13 @@ class IQFimatheBot:
             else:
                 direction = self.check_tiebreaker(last6)
 
-            # Só opera a favor da tendência do DI
-            if direction == 1 and tendencia == "up":
+            if direction != 0:
                 self.last_signal_bar[ativo] = current_bar
-                return 'call'
-            elif direction == -1 and tendencia == "down":
-                self.last_signal_bar[ativo] = current_bar
-                return 'put'
+                return 'call' if direction == 1 else 'put'
             return None
         except Exception as e:
             self.log(f"Erro ao verificar sinais Power Boss ADX para {ativo}: {str(e)}")
             return None
-
-    # --------------------------------------------------------
 
     def executar_operacao(self, ativo, sinal):
         try:
@@ -492,6 +518,7 @@ class IQFimatheBot:
                 self.connected = True
                 self.status_label.config(text="Conectado", foreground="green")
                 self.connect_button.config(state=tk.DISABLED)
+                self.disconnect_button.config(state=tk.NORMAL)
                 self.start_button.config(state=tk.NORMAL)
                 self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
                 self.custom_assets = self.api.get_all_ACTIVES_OPCODE()
@@ -503,10 +530,14 @@ class IQFimatheBot:
                 self.log(f"Falha na conexão: {reason}")
                 messagebox.showerror("Erro", f"Falha na conexão: {reason}")
                 self.connected = False
+                self.connect_button.config(state=tk.NORMAL)
+                self.disconnect_button.config(state=tk.DISABLED)
         except Exception as e:
             self.log(f"Erro na conexão: {str(e)}")
             messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
             self.connected = False
+            self.connect_button.config(state=tk.NORMAL)
+            self.disconnect_button.config(state=tk.DISABLED)
 
     def atualizar_ativos_disponiveis(self):
         try:
@@ -678,6 +709,7 @@ class IQFimatheBot:
         if messagebox.askokcancel("Sair", "Deseja realmente sair?"):
             self.running = False
             self.parar_robo()
+            self.desconectar()
             self.root.destroy()
             sys.exit()
 
