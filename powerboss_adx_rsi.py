@@ -255,6 +255,29 @@ class IQFimatheBot:
         adx_val = adx[-1] if len(adx) > 0 else 0
         return adx_val
 
+    def compute_rsi(self, candles, length=14):
+        closes = np.array([c['close'] for c in candles])
+        if len(closes) < length + 1:
+            return 50  # valor neutro
+        deltas = np.diff(closes)
+        seed = deltas[:length]
+        up = seed[seed >= 0].sum() / length
+        down = -seed[seed < 0].sum() / length
+        rs = up / down if down != 0 else 0
+        rsi = np.zeros_like(closes)
+        rsi[:length] = 100. - 100. / (1. + rs)
+        up_avg = up
+        down_avg = down
+        for i in range(length, len(closes)):
+            delta = deltas[i - 1]
+            upval = max(delta, 0)
+            downval = -min(delta, 0)
+            up_avg = (up_avg * (length - 1) + upval) / length
+            down_avg = (down_avg * (length - 1) + downval) / length
+            rs = up_avg / down_avg if down_avg != 0 else 0
+            rsi[i] = 100. - 100. / (1. + rs)
+        return rsi[-1] if len(rsi) > 0 else 50
+
     def is_doji(self, c):
         corpo = abs(c['close'] - c['open'])
         total = c['max'] - c['min']
@@ -300,7 +323,7 @@ class IQFimatheBot:
             adx_thresh = 25.0
             adx_val = self.compute_adx(candles, length=adx_len)
 
-            # --- LOG DE STATUS DE MERCADO (INÍCIO) ---
+            # ADX: log já existente
             prev_status = self.market_status.get(ativo)
             if adx_val >= adx_thresh:
                 new_status = "trend"
@@ -312,9 +335,9 @@ class IQFimatheBot:
                 else:
                     self.log(f"{ativo}: Mercado consolidado (ADX={adx_val:.2f}) - Operável.")
                 self.market_status[ativo] = new_status
-            # --- LOG DE STATUS DE MERCADO (FIM) ---
 
             if adx_val >= adx_thresh:
+                # O log do ADX já ocorre acima
                 return None
 
             last_bar = self.last_signal_bar.get(ativo, -100)
@@ -349,12 +372,26 @@ class IQFimatheBot:
             else:
                 direction = self.check_tiebreaker(last6)
 
+            # --- Filtro de RSI --- #
+            rsi_len = 14  # padrão
+            rsi_val = self.compute_rsi(candles, length=rsi_len)
+            sobrecompra = 70
+            sobrevenda = 30
+            if direction == 1 and rsi_val >= sobrecompra:
+                self.log(f"{ativo}: RSI {rsi_val:.2f} BLOQUEANDO ENTRADA DE CALL (SOBRECOMPRA).")
+                return None
+            elif direction == -1 and rsi_val <= sobrevenda:
+                self.log(f"{ativo}: RSI {rsi_val:.2f} BLOQUEANDO ENTRADA DE PUT (SOBREVENDA).")
+                return None
+            elif direction != 0:
+                self.log(f"{ativo}: RSI={rsi_val:.2f} - Nenhum bloqueio para a direção {'CALL' if direction==1 else 'PUT'}.")
+
             if direction != 0:
                 self.last_signal_bar[ativo] = current_bar
                 return 'call' if direction == 1 else 'put'
             return None
         except Exception as e:
-            self.log(f"Erro ao verificar sinais Power Boss ADX para {ativo}: {str(e)}")
+            self.log(f"Erro ao verificar sinais Power Boss ADX/RSI para {ativo}: {str(e)}")
             return None
 
     def executar_operacao(self, ativo, sinal):
