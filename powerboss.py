@@ -7,8 +7,8 @@ import sys
 import threading
 import numpy as np
 
-# Import da nova API 7.1.1 do neto-dart
-from iqoptionapi.stable_api import IQ_Option
+# Import correto da API do neto-dart/iqoptionapi baixada localmente
+from iqoptionapi.api import IQ_Option
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class IQFimatheBot:
     def __init__(self, root):
         self.root = root
-        self.root.title("Robô Power Boss ADX_RSI v1.0 - Junior Maciel (API 7.1.1)")
+        self.root.title("Robô Power Boss ADX_RSI v1.0 - Junior Maciel (API neto-dart/iqoptionapi)")
         self.root.geometry("1000x800")
         self.root.resizable(False, False)
         self.api = None
@@ -157,13 +157,13 @@ class IQFimatheBot:
         log_frame = ttk.LabelFrame(main_frame, text=" Log ", padding="10")
         log_frame.grid(row=4, column=0, sticky="nsew", pady=5, padx=5)
         self.log_text = scrolledtext.ScrolledText(log_frame, height=12, state=tk.DISABLED,
-                                                wrap=tk.WORD, bg="black", fg="white",
-                                                insertbackground="white", font=('Consolas', 9))
+                                                  wrap=tk.WORD, bg="black", fg="white",
+                                                  insertbackground="white", font=('Consolas', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
 
-    # ---- Métodos da API 7.1.1 ----
+    # ---- Métodos da API neto-dart/iqoptionapi ----
 
     def conectar(self):
         email = self.email_entry.get().strip()
@@ -174,7 +174,13 @@ class IQFimatheBot:
         self.log(f"Conectando como {email}...")
         try:
             self.api = IQ_Option(email, senha)
-            if not self.api.connect():
+            self.api.connect()
+            # Aguarda login, polling até 10s
+            for _ in range(20):
+                if self.api.check_connect():
+                    break
+                time.sleep(0.5)
+            if not self.api.check_connect():
                 self.log("Falha na conexão: credenciais incorretas ou bloqueio de IP.")
                 messagebox.showerror("Erro", "Falha na conexão: credenciais incorretas ou bloqueio de IP.")
                 self.connected = False
@@ -182,10 +188,7 @@ class IQFimatheBot:
                 self.disconnect_button.config(state=tk.DISABLED)
                 return
             self.conta_tipo = self.conta_combobox.get()
-            if self.conta_tipo == "REAL":
-                self.api.change_balance("REAL")
-            else:
-                self.api.change_balance("PRACTICE")
+            self.api.change_balance(self.conta_tipo)
             self.connected = True
             self.status_label.config(text="Conectado", foreground="green")
             self.connect_button.config(state=tk.DISABLED)
@@ -238,7 +241,12 @@ class IQFimatheBot:
                 email = self.email_entry.get().strip()
                 senha = self.senha_entry.get().strip()
                 self.api = IQ_Option(email, senha)
-                if not self.api.connect():
+                self.api.connect()
+                for _ in range(20):
+                    if self.api.check_connect():
+                        break
+                    time.sleep(0.5)
+                if not self.api.check_connect():
                     self.log("Falha na reconexão: credenciais incorretas ou bloqueio IP.")
                     self.connected = False
                     return False
@@ -523,21 +531,6 @@ class IQFimatheBot:
                                 self.total_acertos += 1
                                 last_result = 'win'
                                 self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result:.2f})")
-                            else:
-                                self.total_erros += 1
-                                last_result = 'loss'
-                                self.log(f"Operação {op_id} em {ativo} finalizada: LOSS (valor: ${self.active_operations[op_id]['valor']:.2f})")
-                            self.update_operation_status(ativo, last_result, op_id)
-                            self.atualizar_estatisticas()
-                            del self.active_operations[op_id]
-                            break
-                        result_alt = self.api.check_win(op_id)
-                        if result_alt is not None:
-                            ativo = self.active_operations[op_id]['ativo']
-                            if result_alt > 0:
-                                self.total_acertos += 1
-                                last_result = 'win'
-                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result_alt:.2f})")
                             else:
                                 self.total_erros += 1
                                 last_result = 'loss'
