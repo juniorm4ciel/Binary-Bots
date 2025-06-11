@@ -2,11 +2,13 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 import time
 from datetime import datetime
-from iqoptionapi.stable_api import IQ_Option
 import logging
 import sys
 import threading
 import numpy as np
+
+# Import da nova API 7.1.1 do neto-dart
+from iqoptionapi.api import IQOptionAPI
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 class IQFimatheBot:
     def __init__(self, root):
         self.root = root
-        self.root.title("Robô Power Boss ADX_RSI v1.0 - Junior Maciel")
+        self.root.title("Robô Power Boss ADX_RSI v1.0 - Junior Maciel (API 7.1.1)")
         self.root.geometry("1000x800")
         self.root.resizable(False, False)
         self.api = None
@@ -33,7 +35,7 @@ class IQFimatheBot:
         self.last_candles = {}
         self.custom_assets = {}
         self.martingale_status = {}
-        self.market_status = {}  # Salva o status anterior do mercado para cada ativo
+        self.market_status = {}
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -161,6 +163,64 @@ class IQFimatheBot:
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
 
+    # ---- Métodos da API 7.1.1 ----
+
+    def conectar(self):
+        email = self.email_entry.get().strip()
+        senha = self.senha_entry.get().strip()
+        if not email or not senha:
+            messagebox.showerror("Erro", "Email e senha são obrigatórios")
+            return
+        self.log(f"Conectando como {email}...")
+        try:
+            self.api = IQOptionAPI(email, senha)
+            if not self.api.connect():
+                self.log("Falha na conexão: credenciais incorretas ou bloqueio de IP.")
+                messagebox.showerror("Erro", "Falha na conexão: credenciais incorretas ou bloqueio de IP.")
+                self.connected = False
+                self.connect_button.config(state=tk.NORMAL)
+                self.disconnect_button.config(state=tk.DISABLED)
+                return
+            self.conta_tipo = self.conta_combobox.get()
+            if self.conta_tipo == "REAL":
+                self.api.change_balance("REAL")
+            else:
+                self.api.change_balance("PRACTICE")
+            self.connected = True
+            self.status_label.config(text="Conectado", foreground="green")
+            self.connect_button.config(state=tk.DISABLED)
+            self.disconnect_button.config(state=tk.NORMAL)
+            self.start_button.config(state=tk.NORMAL)
+            self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
+            self.custom_assets = self.api.get_all_open_time()
+            time.sleep(1)
+            self.atualizar_ativos_disponiveis()
+        except Exception as e:
+            self.log(f"Erro na conexão: {str(e)}")
+            messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
+            self.connected = False
+            self.connect_button.config(state=tk.NORMAL)
+            self.disconnect_button.config(state=tk.DISABLED)
+
+    def desconectar(self):
+        if self.api:
+            try:
+                self.api.close()
+            except Exception:
+                pass
+        self.api = None
+        self.connected = False
+        self.status_label.config(text="Desconectado", foreground="red")
+        self.connect_button.config(state=tk.NORMAL)
+        self.disconnect_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.DISABLED)
+        self.log("Desconectado da corretora.")
+
+    def verificar_conexao(self):
+        if self.api and self.connected:
+            return self.api.check_connect()
+        return False
+
     def atualizar_saldo(self):
         try:
             if not self.api or not self.connected:
@@ -177,44 +237,69 @@ class IQFimatheBot:
                 self.log("Reconectando à API...")
                 email = self.email_entry.get().strip()
                 senha = self.senha_entry.get().strip()
-                self.api = IQ_Option(email, senha)
-                check, reason = self.api.connect()
-                if check:
-                    self.api.change_balance(self.conta_tipo)
-                    self.custom_assets = self.api.get_all_ACTIVES_OPCODE()
-                    self.custom_assets["EURAUD-OTC"] = 77
-                    self.custom_assets["EURCAD-OTC"] = 78
-                    self.connected = True
-                    self.log("Reconexão bem-sucedida")
-                    time.sleep(1)
-                else:
-                    self.log(f"Falha na reconexão: {reason}")
+                self.api = IQOptionAPI(email, senha)
+                if not self.api.connect():
+                    self.log("Falha na reconexão: credenciais incorretas ou bloqueio IP.")
                     self.connected = False
                     return False
+                self.conta_tipo = self.conta_combobox.get()
+                self.api.change_balance(self.conta_tipo)
+                self.custom_assets = self.api.get_all_open_time()
+                self.connected = True
+                self.log("Reconexão bem-sucedida")
+                time.sleep(1)
             return True
         except Exception as e:
             self.log(f"Erro ao reconectar: {str(e)}")
             self.connected = False
             return False
 
-    def verificar_conexao(self):
-        if self.api and self.connected:
-            return self.api.check_connect()
-        return False
-
-    def desconectar(self):
-        if self.api:
+    def atualizar_ativos_disponiveis(self):
+        try:
+            if not self.api:
+                self.log("Erro: API não inicializada.")
+                return
+            if not self.connected:
+                self.log("Erro: API não conectada.")
+                return
+            if not self.api.check_connect():
+                self.log("Erro: Conexão com a API perdida.")
+                return
+            ativos = []
             try:
-                self.api.close()  # Fecha a conexão (se a API possuir esse método)
+                open_time = self.api.get_all_open_time()
+                for ativo, v in open_time['binary'].items():
+                    if v["open"]:
+                        if self.operar_otc.get() or not ativo.endswith('-OTC'):
+                            ativos.append(ativo)
+                if not ativos:
+                    ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
             except Exception:
-                pass
-        self.api = None
-        self.connected = False
-        self.status_label.config(text="Desconectado", foreground="red")
-        self.connect_button.config(state=tk.NORMAL)
-        self.disconnect_button.config(state=tk.DISABLED)
-        self.start_button.config(state=tk.DISABLED)
-        self.log("Desconectado da corretora.")
+                ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
+            self.ativos_disponiveis = sorted(ativos)
+            self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
+            if not self.ativos_selecionados and "EURUSD-OTC" in self.ativos_disponiveis:
+                self.ativos_selecionados = ["EURUSD-OTC"]
+                self.log("Selecionado EURUSD-OTC como padrão")
+            self.carregar_ativos()
+            self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
+            self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
+        except Exception as e:
+            self.log(f"Erro ao atualizar ativos: {str(e)}")
+            if self.reconnect_api():
+                time.sleep(5)
+                self.atualizar_ativos_disponiveis()
+
+    def carregar_ativos(self):
+        self.ativos_listbox.delete(0, tk.END)
+        for ativo in sorted(self.ativos_disponiveis):
+            self.ativos_listbox.insert(tk.END, ativo)
+
+    def obter_ativos_selecionados(self):
+        selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
+        return selecionados
+
+    # ----------- Estratégia e Execução -----------
 
     def compute_adx(self, candles, length=14):
         highs = np.array([c['max'] for c in candles])
@@ -257,7 +342,7 @@ class IQFimatheBot:
     def compute_rsi(self, candles, length=14):
         closes = np.array([c['close'] for c in candles])
         if len(closes) < length + 1:
-            return 50  # valor neutro
+            return 50
         deltas = np.diff(closes)
         seed = deltas[:length]
         up = seed[seed >= 0].sum() / length
@@ -312,8 +397,7 @@ class IQFimatheBot:
             if not self.api or not self.connected:
                 self.log("API não inicializada.")
                 return None
-
-            current_time = self.api.get_server_timestamp() if self.api else time.time()
+            current_time = int(time.time())
             candles = self.api.get_candles(ativo, 60, 20, current_time)
             if candles is None or len(candles) < 20:
                 return None
@@ -321,11 +405,8 @@ class IQFimatheBot:
             adx_len = 14
             adx_thresh = 25.0
             adx_val = self.compute_adx(candles, length=adx_len)
-
-            # Log do indicador ADX
             self.log(f"{ativo}: ADX={adx_val:.2f}")
 
-            # Filtro de ADX
             prev_status = self.market_status.get(ativo)
             if adx_val >= adx_thresh:
                 new_status = "trend"
@@ -341,7 +422,6 @@ class IQFimatheBot:
             if adx_val >= adx_thresh:
                 return None
 
-            # Delay de sinal (mantido)
             last_bar = self.last_signal_bar.get(ativo, -100)
             current_bar = candles[-1]['from'] // 60
             if current_bar - last_bar < 12:
@@ -366,8 +446,7 @@ class IQFimatheBot:
                 msg_velas += f" Sinal detectado: {'CALL' if direction == 1 else 'PUT' if direction == -1 else 'NENHUM'}."
                 self.log(msg_velas)
 
-            # --- Filtro de RSI --- #
-            rsi_len = 14  # padrão
+            rsi_len = 14
             rsi_val = self.compute_rsi(candles, length=rsi_len)
             sobrecompra = 70
             sobrevenda = 30
@@ -388,13 +467,15 @@ class IQFimatheBot:
             self.log(f"Erro ao verificar sinais Power Boss ADX/RSI para {ativo}: {str(e)}")
             return None
 
+    def get_current_value(self, ativo):
+        return self.operacoes_per_ativo.get(ativo, {'current_value': float(self.valor_entry.get())})['current_value']
+
     def executar_operacao(self, ativo, sinal):
         try:
             if not self.api or not self.connected:
                 self.log("API não inicializada.")
                 return False
             if ativo in self.suspended_assets:
-                self.log(f"{ativo}: Ativo suspenso para operações.")
                 return False
             valor = self.get_current_value(ativo)
             exp = int(self.expiry_combobox.get())
@@ -402,16 +483,15 @@ class IQFimatheBot:
             if saldo < valor:
                 self.log(f"Erro: Saldo insuficiente para operação em {ativo}.")
                 return False
-            check, operation_id = self.api.buy(valor, ativo, sinal, exp)
-            if check:
-                self.active_operations[operation_id] = {'ativo': ativo, 'sinal': sinal, 'valor': valor}
+            status, order_id = self.api.buy(valor, ativo, sinal, exp)
+            if status:
+                self.active_operations[order_id] = {'ativo': ativo, 'sinal': sinal, 'valor': valor}
                 self.operacoes_realizadas[ativo] = self.operacoes_realizadas.get(ativo, 0) + 1
                 self.atualizar_estatisticas()
-                self.log(f"Operação iniciada: {sinal.upper()} em {ativo} com valor ${valor:.2f} e expiração {exp} minutos. ID: {operation_id}")
+                self.log(f"Operação iniciada: {sinal.upper()} em {ativo} com valor ${valor:.2f} e expiração {exp} minutos. ID: {order_id}")
                 return True
             else:
-                self.log(f"Falha ao executar operação em {ativo}: {operation_id}")
-                if 'active is suspended' in str(operation_id).lower():
+                if 'active is suspended' in str(order_id).lower():
                     self.suspended_assets.add(ativo)
                 return False
         except Exception as e:
@@ -473,9 +553,6 @@ class IQFimatheBot:
                     self.log(f"Operação {op_id} não finalizada após 60 tentativas")
         except Exception as e:
             self.log(f"Erro ao verificar operações finalizadas: {str(e)}")
-
-    def get_current_value(self, ativo):
-        return self.operacoes_per_ativo.get(ativo, {'current_value': float(self.valor_entry.get())})['current_value']
 
     def iniciar_robo(self):
         if not self.connected:
@@ -591,85 +668,6 @@ class IQFimatheBot:
         self.stop_button.config(state=tk.DISABLED)
         self.status_label.config(text="Parado", foreground="red")
         self.log(f"=== OPERAÇÃO ENCERRADA === Motivo: {motivo}")
-
-    def conectar(self):
-        email = self.email_entry.get().strip()
-        senha = self.senha_entry.get().strip()
-        if not email or not senha:
-            messagebox.showerror("Erro", "Email e senha são obrigatórios")
-            return
-        self.log(f"Conectando como {email}...")
-        try:
-            self.api = IQ_Option(email, senha)
-            check, reason = self.api.connect()
-            if check:
-                self.conta_tipo = self.conta_combobox.get()
-                self.api.change_balance(self.conta_tipo)
-                self.connected = True
-                self.status_label.config(text="Conectado", foreground="green")
-                self.connect_button.config(state=tk.DISABLED)
-                self.disconnect_button.config(state=tk.NORMAL)
-                self.start_button.config(state=tk.NORMAL)
-                self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
-                self.custom_assets = self.api.get_all_ACTIVES_OPCODE()
-                self.custom_assets["EURAUD-OTC"] = 77
-                self.custom_assets["EURCAD-OTC"] = 78
-                time.sleep(1)
-                self.atualizar_ativos_disponiveis()
-            else:
-                self.log(f"Falha na conexão: {reason}")
-                messagebox.showerror("Erro", f"Falha na conexão: {reason}")
-                self.connected = False
-                self.connect_button.config(state=tk.NORMAL)
-                self.disconnect_button.config(state=tk.DISABLED)
-        except Exception as e:
-            self.log(f"Erro na conexão: {str(e)}")
-            messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
-            self.connected = False
-            self.connect_button.config(state=tk.NORMAL)
-            self.disconnect_button.config(state=tk.DISABLED)
-
-    def atualizar_ativos_disponiveis(self):
-        try:
-            if not self.api:
-                self.log("Erro: API não inicializada.")
-                return
-            if not self.connected:
-                self.log("Erro: API não conectada.")
-                return
-            if not self.api.check_connect():
-                self.log("Erro: Conexão com a API perdida.")
-                return
-            try:
-                activos = self.api.get_all_ACTIVES_OPCODE()
-                if activos:
-                    novos_ativos = [ativo for ativo in activos.keys() if self.operar_otc.get() or not ativo.endswith('-OTC')]
-                else:
-                    novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
-            except Exception as fallback_error:
-                novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
-            self.ativos_disponiveis = sorted(novos_ativos)
-            self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
-            if not self.ativos_selecionados and "EURUSD-OTC" in self.ativos_disponiveis:
-                self.ativos_selecionados = ["EURUSD-OTC"]
-                self.log("Selecionado EURUSD-OTC como padrão")
-            self.carregar_ativos()
-            self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
-            self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
-        except Exception as e:
-            self.log(f"Erro ao atualizar ativos: {str(e)}")
-            if self.reconnect_api():
-                time.sleep(5)
-                self.atualizar_ativos_disponiveis()
-
-    def carregar_ativos(self):
-        self.ativos_listbox.delete(0, tk.END)
-        for ativo in sorted(self.ativos_disponiveis):
-            self.ativos_listbox.insert(tk.END, ativo)
-
-    def obter_ativos_selecionados(self):
-        selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
-        return selecionados
 
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
