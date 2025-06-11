@@ -6,6 +6,7 @@ from iqoptionapi.stable_api import IQ_Option
 import logging
 import sys
 import threading
+import numpy as np
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 class IQFimatheBot:
     def __init__(self, root):
         self.root = root
-        self.root.title("Robô FIMATHE 4.0 - Junior Maciel")
+        self.root.title("Robô Power Boss ADX_RSI v1.0 - Junior Maciel")
         self.root.geometry("1000x800")
         self.root.resizable(False, False)
         self.api = None
@@ -28,9 +29,11 @@ class IQFimatheBot:
         self.active_operations = {}
         self.operacoes_per_ativo = {}
         self.suspended_assets = set()
-        self.last_signal_candle = {}  # <--- Para evitar múltiplas entradas no mesmo candle
+        self.last_signal_bar = {}
+        self.last_candles = {}
         self.custom_assets = {}
         self.martingale_status = {}
+        self.market_status = {}  # Salva o status anterior do mercado para cada ativo
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -75,8 +78,8 @@ class IQFimatheBot:
         config_frame.grid(row=1, column=0, sticky="ew", pady=5, padx=5)
         ttk.Label(config_frame, text="Ativos Disponíveis:").grid(row=0, column=0, sticky="w", pady=2)
         self.ativos_listbox = tk.Listbox(config_frame, selectmode=tk.MULTIPLE, height=10, width=25,
-                                         bg="white", fg="black", selectbackground="#0078d7",
-                                         font=('Arial', 9))
+                                       bg="white", fg="black", selectbackground="#0078d7",
+                                       font=('Arial', 9))
         self.ativos_listbox.grid(row=1, column=0, rowspan=6, sticky="ns", padx=5)
         scrollbar = ttk.Scrollbar(config_frame, orient="vertical", command=self.ativos_listbox.yview)
         scrollbar.grid(row=1, column=1, rowspan=6, sticky="ns")
@@ -152,8 +155,8 @@ class IQFimatheBot:
         log_frame = ttk.LabelFrame(main_frame, text=" Log ", padding="10")
         log_frame.grid(row=4, column=0, sticky="nsew", pady=5, padx=5)
         self.log_text = scrolledtext.ScrolledText(log_frame, height=12, state=tk.DISABLED,
-                                                  wrap=tk.WORD, bg="black", fg="white",
-                                                  insertbackground="white", font=('Consolas', 9))
+                                                wrap=tk.WORD, bg="black", fg="white",
+                                                insertbackground="white", font=('Consolas', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
@@ -212,6 +215,183 @@ class IQFimatheBot:
         self.disconnect_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
         self.log("Desconectado da corretora.")
+
+    def compute_adx(self, candles, length=14):
+        highs = np.array([c['max'] for c in candles])
+        lows = np.array([c['min'] for c in candles])
+        closes = np.array([c['close'] for c in candles])
+
+        plus_dm = np.zeros_like(highs)
+        minus_dm = np.zeros_like(highs)
+        tr = np.zeros_like(highs)
+
+        for i in range(1, len(highs)):
+            up_move = highs[i] - highs[i-1]
+            down_move = lows[i-1] - lows[i]
+            plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
+            minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
+            tr[i] = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i] - closes[i-1])
+            )
+
+        plus_di = np.zeros_like(highs)
+        minus_di = np.zeros_like(highs)
+        adx = np.zeros_like(highs)
+
+        for i in range(length, len(highs)):
+            sum_tr = np.sum(tr[i-length+1:i+1])
+            sum_plus_dm = np.sum(plus_dm[i-length+1:i+1])
+            sum_minus_dm = np.sum(minus_dm[i-length+1:i+1])
+            plus_di[i] = 100 * (sum_plus_dm / sum_tr) if sum_tr != 0 else 0
+            minus_di[i] = 100 * (sum_minus_dm / sum_tr) if sum_tr != 0 else 0
+            dxs = []
+            for j in range(i-length+1, i+1):
+                den = plus_di[j] + minus_di[j]
+                dxs.append(abs(plus_di[j] - minus_di[j]) / den * 100 if den != 0 else 0)
+            adx[i] = np.mean(dxs)
+        adx_val = adx[-1] if len(adx) > 0 else 0
+        return adx_val
+
+    def compute_rsi(self, candles, length=14):
+        closes = np.array([c['close'] for c in candles])
+        if len(closes) < length + 1:
+            return 50  # valor neutro
+        deltas = np.diff(closes)
+        seed = deltas[:length]
+        up = seed[seed >= 0].sum() / length
+        down = -seed[seed < 0].sum() / length
+        rs = up / down if down != 0 else 0
+        rsi = np.zeros_like(closes)
+        rsi[:length] = 100. - 100. / (1. + rs)
+        up_avg = up
+        down_avg = down
+        for i in range(length, len(closes)):
+            delta = deltas[i - 1]
+            upval = max(delta, 0)
+            downval = -min(delta, 0)
+            up_avg = (up_avg * (length - 1) + upval) / length
+            down_avg = (down_avg * (length - 1) + downval) / length
+            rs = up_avg / down_avg if down_avg != 0 else 0
+            rsi[i] = 100. - 100. / (1. + rs)
+        return rsi[-1] if len(rsi) > 0 else 50
+
+    def is_doji(self, c):
+        corpo = abs(c['close'] - c['open'])
+        total = c['max'] - c['min']
+        if total == 0:
+            return True
+        return corpo <= total * 0.1
+
+    def check_tiebreaker(self, candles):
+        c = lambda i: candles[i]['close']
+        o = lambda i: candles[i]['open']
+        padroes = [
+            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)>o(2) and c(3)<o(3) and c(4)<o(4) and c(5)<o(5), -1),
+            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)<o(2) and c(3)>o(3) and c(4)<o(4) and c(5)<o(5), -1),
+            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)<o(2) and c(3)<o(3) and c(4)>o(4) and c(5)<o(5), -1),
+            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)<o(2) and c(3)<o(3) and c(4)<o(4) and c(5)>o(5), 1),
+            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)>o(2) and c(3)>o(3) and c(4)<o(4) and c(5)<o(5), -1),
+            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)>o(2) and c(3)<o(3) and c(4)>o(4) and c(5)<o(5), -1),
+            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)>o(2) and c(3)<o(3) and c(4)<o(4) and c(5)>o(5), 1),
+            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)<o(2) and c(3)>o(3) and c(4)>o(4) and c(5)<o(5), -1),
+            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)<o(2) and c(3)>o(3) and c(4)<o(4) and c(5)>o(5), 1),
+            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)<o(2) and c(3)<o(3) and c(4)>o(4) and c(5)>o(5), 1)
+        ]
+        for cond, direcao in padroes:
+            try:
+                if cond():
+                    return direcao
+            except Exception:
+                continue
+        return 0
+
+    def verificar_sinais_powerboss(self, ativo):
+        try:
+            if not self.api or not self.connected:
+                self.log("API não inicializada.")
+                return None
+
+            current_time = self.api.get_server_timestamp() if self.api else time.time()
+            candles = self.api.get_candles(ativo, 60, 20, current_time)
+            if candles is None or len(candles) < 20:
+                return None
+            candles = sorted(candles, key=lambda x: x['from'])
+            adx_len = 14
+            adx_thresh = 25.0
+            adx_val = self.compute_adx(candles, length=adx_len)
+
+            # Log do indicador ADX
+            self.log(f"{ativo}: ADX={adx_val:.2f}")
+
+            # Filtro de ADX
+            prev_status = self.market_status.get(ativo)
+            if adx_val >= adx_thresh:
+                new_status = "trend"
+            else:
+                new_status = "consolidated"
+            if prev_status != new_status:
+                if new_status == "trend":
+                    self.log(f"{ativo}: Mercado em tendência forte (ADX={adx_val:.2f}) - NÃO operável.")
+                else:
+                    self.log(f"{ativo}: Mercado consolidado (ADX={adx_val:.2f}) - Operável.")
+                self.market_status[ativo] = new_status
+
+            if adx_val >= adx_thresh:
+                return None
+
+            # Delay de sinal (mantido)
+            last_bar = self.last_signal_bar.get(ativo, -100)
+            current_bar = candles[-1]['from'] // 60
+            if current_bar - last_bar < 12:
+                return None
+
+            last6 = candles[-6:]
+            up = sum(1 for c in last6 if c['close'] > c['open'])
+            down = sum(1 for c in last6 if c['close'] < c['open'])
+            doji_indexes = [i for i, c in enumerate(last6) if self.is_doji(c)]
+
+            msg_velas = f"{ativo}: Velas analisadas - Altas: {up}, Baixas: {down}."
+            if doji_indexes:
+                msg_velas += f" Encontrado doji na(s) vela(s): {', '.join(str(i+1) for i in doji_indexes)}. NÃO operável."
+                self.log(msg_velas)
+                return None
+            elif up == down:
+                msg_velas += " Empate de velas. NÃO operável."
+                self.log(msg_velas)
+                return None
+            else:
+                direction = 1 if up > down else -1 if down > up else self.check_tiebreaker(last6)
+                msg_velas += f" Sinal detectado: {'CALL' if direction == 1 else 'PUT' if direction == -1 else 'NENHUM'}."
+                self.log(msg_velas)
+
+            # --- Filtro de RSI --- #
+            rsi_len = 14  # padrão
+            rsi_val = self.compute_rsi(candles, length=rsi_len)
+            sobrecompra = 70
+            sobrevenda = 30
+            if direction == 1 and rsi_val >= sobrecompra:
+                self.log(f"{ativo}: RSI {rsi_val:.2f} BLOQUEANDO ENTRADA DE CALL (SOBRECOMPRA).")
+                return None
+            elif direction == -1 and rsi_val <= sobrevenda:
+                self.log(f"{ativo}: RSI {rsi_val:.2f} BLOQUEANDO ENTRADA DE PUT (SOBREVENDA).")
+                return None
+            elif direction != 0:
+                self.log(f"{ativo}: RSI={rsi_val:.2f} - Nenhum bloqueio para a direção {'CALL' if direction==1 else 'PUT'}.")
+
+            if direction != 0:
+                self.last_signal_bar[ativo] = current_bar
+                return 'call' if direction == 1 else 'put'
+            return None
+        except Exception as e:
+            self.log(f"Erro ao verificar sinais Power Boss ADX/RSI para {ativo}: {str(e)}")
+            return None
+
+    # Demais métodos (execução, estatísticas, atualizar ativos, etc.) permanecem idênticos ao original,
+    # só removendo qualquer menção a DI+ e DI-.
+
+    # ... (restante do código igual ao original, sem cortes, omiti para foco na UI e lógica principal)
 
     def executar_operacao(self, ativo, sinal):
         try:
@@ -323,7 +503,8 @@ class IQFimatheBot:
         }
         self.operacoes_realizadas = {ativo: 0 for ativo in self.ativos_selecionados}
         self.suspended_assets.clear()
-        self.last_signal_candle.clear()
+        self.last_signal_bar.clear()
+        self.last_candles.clear()
         self.total_acertos = 0
         self.total_erros = 0
         self.running = True
@@ -339,8 +520,65 @@ class IQFimatheBot:
         self.log(f"Soros: {self.soros_spinbox.get()}%")
         self.log(f"OTC: {'SIM' if self.operar_otc.get() else 'NÃO'}")
         self.log("========================")
-        threading.Thread(target=self.loop_operacoes, daemon=True).start()
+        threading.Thread(target=self.loop_operacoes_primeiro_ciclo, daemon=True).start()
         threading.Thread(target=self.check_finished_operations_loop, daemon=True).start()
+
+    def loop_operacoes_primeiro_ciclo(self):
+        self.loop_operacoes(ciclo_rapido=True)
+
+    def loop_operacoes(self, ciclo_rapido=False):
+        max_entradas = int(self.entradas_spinbox.get())
+        lucro_alvo = float(self.lucro_entry.get()) if self.lucro_entry.get() else float('inf')
+        perda_alvo = float(self.perda_entry.get()) if self.perda_entry.get() else float('inf')
+        saldo_inicial = self.api.get_balance() if self.api else 0
+        while self.running:
+            if self.lucro_stop_loss_var.get():
+                saldo_atual = self.api.get_balance() if self.api else 0
+                if saldo_atual >= saldo_inicial + lucro_alvo:
+                    self.log(f"Lucro alvo de ${lucro_alvo:.2f} atingido. Parando operações.")
+                    self.parar_robo()
+                    return
+                elif saldo_atual <= saldo_inicial - perda_alvo:
+                    self.log(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
+                    self.parar_robo()
+                    return
+
+            if not self.verificar_conexao():
+                self.log("Aguardando reconexão...")
+                time.sleep(5)
+                continue
+
+            all_ativos_limitados = all(self.operacoes_realizadas.get(ativo, 0) >= max_entradas for ativo in self.ativos_selecionados)
+            if not self.lucro_stop_loss_var.get() and all_ativos_limitados:
+                self.log("Número máximo de entradas atingido em todos os ativos. Parando o robô.")
+                self.parar_robo()
+                return
+
+            for ativo in self.ativos_selecionados:
+                if not self.running:
+                    break
+                if not self.lucro_stop_loss_var.get() and self.operacoes_realizadas.get(ativo, 0) >= max_entradas:
+                    continue
+                if ativo in self.martingale_status:
+                    if not self.existe_operacao_pendente(ativo):
+                        mg = self.martingale_status[ativo]
+                        self.log(f"Entrando em Martingale Nível {mg['nivel']} para {ativo} na direção {mg['direcao'].upper()}")
+                        if self.executar_operacao(ativo, mg['direcao']):
+                            self.operacoes_per_ativo[ativo]['martingale_level'] = mg['nivel']
+                        else:
+                            self.log(f"Falha ao executar martingale para {ativo}")
+                        time.sleep(1 if ciclo_rapido else 5)
+                    continue
+                if not self.existe_operacao_pendente(ativo):
+                    sinal = self.verificar_sinais_powerboss(ativo)
+                    if sinal:
+                        self.log(f"Sinal {sinal.upper()} em {ativo}, tentando executar operação")
+                        if self.executar_operacao(ativo, sinal):
+                            self.martingale_status.pop(ativo, None)
+                            time.sleep(1 if ciclo_rapido else 5)
+                time.sleep(0.2 if ciclo_rapido else 0.5)
+            time.sleep(0.2 if ciclo_rapido else 2)
+            ciclo_rapido = False
 
     def parar_robo(self):
         motivo = "Manual" if self.running else "Automático"
@@ -506,103 +744,6 @@ class IQFimatheBot:
             info['soros_base_value'] = initial_value
             info['martingale_level'] = 0
             self.martingale_status.pop(ativo, None)
-
-    def loop_operacoes(self):
-        max_entradas = int(self.entradas_spinbox.get())
-        lucro_alvo = float(self.lucro_entry.get()) if self.lucro_entry.get() else float('inf')
-        perda_alvo = float(self.perda_entry.get()) if self.perda_entry.get() else float('inf')
-        saldo_inicial = self.api.get_balance() if self.api else 0
-        while self.running:
-            if self.lucro_stop_loss_var.get():
-                saldo_atual = self.api.get_balance() if self.api else 0
-                if saldo_atual >= saldo_inicial + lucro_alvo:
-                    self.log(f"Lucro alvo de ${lucro_alvo:.2f} atingido. Parando operações.")
-                    self.parar_robo()
-                    return
-                elif saldo_atual <= saldo_inicial - perda_alvo:
-                    self.log(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
-                    self.parar_robo()
-                    return
-
-            if not self.verificar_conexao():
-                self.log("Aguardando reconexão...")
-                time.sleep(5)
-                continue
-
-            all_ativos_limitados = all(self.operacoes_realizadas.get(ativo, 0) >= max_entradas for ativo in self.ativos_selecionados)
-            if not self.lucro_stop_loss_var.get() and all_ativos_limitados:
-                self.log("Número máximo de entradas atingido em todos os ativos. Parando o robô.")
-                self.parar_robo()
-                return
-
-            for ativo in self.ativos_selecionados:
-                if not self.running:
-                    break
-                if not self.lucro_stop_loss_var.get() and self.operacoes_realizadas.get(ativo, 0) >= max_entradas:
-                    continue
-                if ativo in self.martingale_status:
-                    if not self.existe_operacao_pendente(ativo):
-                        mg = self.martingale_status[ativo]
-                        self.log(f"Entrando em Martingale Nível {mg['nivel']} para {ativo} na direção {mg['direcao'].upper()}")
-                        if self.executar_operacao(ativo, mg['direcao']):
-                            self.operacoes_per_ativo[ativo]['martingale_level'] = mg['nivel']
-                        else:
-                            self.log(f"Falha ao executar martingale para {ativo}")
-                        time.sleep(5)
-                    continue
-                if not self.existe_operacao_pendente(ativo):
-                    sinal, candle_time = self.verificar_sinais_fimathe_fechamento(ativo)
-                    # Só entra se ainda não entrou nesta vela (candle_time) para esse ativo
-                    if sinal and self.last_signal_candle.get(ativo) != candle_time:
-                        self.log(f"Sinal {sinal.upper()} em {ativo}, executando operação na vela atual (candle_time={candle_time})")
-                        if self.executar_operacao(ativo, sinal):
-                            self.martingale_status.pop(ativo, None)
-                            self.last_signal_candle[ativo] = candle_time
-                            time.sleep(2)
-                time.sleep(0.5)
-            time.sleep(1)
-
-    def verificar_sinais_fimathe_fechamento(self, ativo):
-        """
-        Sinal só é confirmado se a vela ANTERIOR fechar rompendo o nível.
-        Retorna ('call'|'put'|None, candle_time_entrada).
-        """
-        try:
-            canal_periodo = 20
-            now = self.api.get_server_timestamp() if self.api else time.time()
-
-            # Canal H1
-            candles_h1 = self.api.get_candles(ativo, 60*60, canal_periodo, now)
-            if candles_h1 is None or len(candles_h1) < canal_periodo:
-                return None, None
-            highs = [c['max'] for c in candles_h1]
-            lows = [c['min'] for c in candles_h1]
-            canal_topo = max(highs)
-            canal_fundo = min(lows)
-            canal_meio = (canal_topo + canal_fundo) / 2
-
-            # Velas M1: precisamos das 3 últimas para comparar fechamentos
-            candles_m1 = self.api.get_candles(ativo, 60, 3, now)
-            if candles_m1 is None or len(candles_m1) < 3:
-                return None, None
-            velas = sorted(candles_m1, key=lambda x: x['from'])
-            fechamento_2 = velas[-3]['close']
-            fechamento_1 = velas[-2]['close']  # fechamento da vela que acaba de fechar
-            candle_time_para_entrada = velas[-1]['from']  # timestamp da vela EM FORMAÇÃO/agora
-
-            rompeu_meio_para_cima = fechamento_1 > canal_meio and fechamento_2 <= canal_meio
-            rompeu_fundo_para_baixo = fechamento_1 < canal_fundo and fechamento_2 >= canal_fundo
-
-            if rompeu_meio_para_cima:
-                self.log(f"{ativo}: Sinal de COMPRA confirmado no fechamento da vela anterior! (CLOSE={fechamento_1:.5f} > MEIO={canal_meio:.5f}). Entrada nesta vela.")
-                return 'call', candle_time_para_entrada
-            if rompeu_fundo_para_baixo:
-                self.log(f"{ativo}: Sinal de VENDA confirmado no fechamento da vela anterior! (CLOSE={fechamento_1:.5f} < FUNDO={canal_fundo:.5f}). Entrada nesta vela.")
-                return 'put', candle_time_para_entrada
-            return None, None
-        except Exception as e:
-            self.log(f"Erro ao verificar sinais FIMATHE (confirmação por fechamento) para {ativo}: {str(e)}")
-            return None, None
 
     def on_closing(self):
         if messagebox.askokcancel("Sair", "Deseja realmente sair?"):
