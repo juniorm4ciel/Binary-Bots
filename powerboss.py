@@ -8,7 +8,7 @@ import threading
 import numpy as np
 
 # Import da nova API 7.1.1 do neto-dart
-from iqoptionapi.api import IQOptionAPI
+from iqoptionapi.stable_api import IQ_Option
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ class IQFimatheBot:
             return
         self.log(f"Conectando como {email}...")
         try:
-            self.api = IQOptionAPI(email, senha)
+            self.api = IQ_Option(email, senha)
             if not self.api.connect():
                 self.log("Falha na conexão: credenciais incorretas ou bloqueio de IP.")
                 messagebox.showerror("Erro", "Falha na conexão: credenciais incorretas ou bloqueio de IP.")
@@ -237,7 +237,7 @@ class IQFimatheBot:
                 self.log("Reconectando à API...")
                 email = self.email_entry.get().strip()
                 senha = self.senha_entry.get().strip()
-                self.api = IQOptionAPI(email, senha)
+                self.api = IQ_Option(email, senha)
                 if not self.api.connect():
                     self.log("Falha na reconexão: credenciais incorretas ou bloqueio IP.")
                     self.connected = False
