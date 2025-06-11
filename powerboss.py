@@ -7,8 +7,8 @@ import sys
 import threading
 import numpy as np
 
-# Import correto da API do neto-dart/iqoptionapi baixada localmente
-from iqoptionapi.api import IQ_Option
+# Import correto para o seu pacote IQOptionAPI
+from iqoptionapi.api import IQOptionAPI
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -173,9 +173,8 @@ class IQFimatheBot:
             return
         self.log(f"Conectando como {email}...")
         try:
-            self.api = IQ_Option(email, senha)
+            self.api = IQOptionAPI("iqoption.com", email, senha)
             self.api.connect()
-            # Aguarda login, polling até 10s
             for _ in range(20):
                 if self.api.check_connect():
                     break
@@ -240,7 +239,7 @@ class IQFimatheBot:
                 self.log("Reconectando à API...")
                 email = self.email_entry.get().strip()
                 senha = self.senha_entry.get().strip()
-                self.api = IQ_Option(email, senha)
+                self.api = IQOptionAPI(email, senha)
                 self.api.connect()
                 for _ in range(20):
                     if self.api.check_connect():
@@ -306,8 +305,6 @@ class IQFimatheBot:
     def obter_ativos_selecionados(self):
         selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
         return selecionados
-
-    # ----------- Estratégia e Execução -----------
 
     def compute_adx(self, candles, length=14):
         highs = np.array([c['max'] for c in candles])
