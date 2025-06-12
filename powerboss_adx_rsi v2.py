@@ -7,6 +7,7 @@ import logging
 import sys
 import threading
 import numpy as np
+from iqoptionapi.constants import ACTIVES
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -34,9 +35,12 @@ class IQFimatheBot:
         self.custom_assets = {}
         self.martingale_status = {}
         self.market_status = {}
+        self.consts = None
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    # ---------- UI ----------
 
     def setup_styles(self):
         style = ttk.Style()
@@ -126,7 +130,6 @@ class IQFimatheBot:
         self.saldo_label.grid(row=11, column=1, sticky="w", pady=2)
         self.update_saldo_button = ttk.Button(config_frame, text="Atualizar Saldo", command=self.atualizar_saldo)
         self.update_saldo_button.grid(row=11, column=2, sticky="w", padx=5)
-        # Botão para atualizar ativos manualmente
         self.update_assets_button = ttk.Button(config_frame, text="Atualizar Ativos", command=self.atualizar_ativos_disponiveis)
         self.update_assets_button.grid(row=11, column=3, sticky="w", padx=5)
 
@@ -163,6 +166,56 @@ class IQFimatheBot:
         self.log_text.pack(fill=tk.BOTH, expand=True)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
+
+    # ---------- Conexão e API ----------
+
+    def conectar(self):
+        email = self.email_entry.get().strip()
+        senha = self.senha_entry.get().strip()
+        if not email or not senha:
+            messagebox.showerror("Erro", "Email e senha são obrigatórios")
+            return
+        self.log(f"Conectando como {email}...")
+        try:
+            self.api = IQ_Option(email, senha)
+            check, reason = self.api.connect()
+            if check:
+                self.conta_tipo = self.conta_combobox.get()
+                self.api.change_balance(self.conta_tipo)
+                self.connected = True
+                self.status_label.config(text="Conectado", foreground="green")
+                self.connect_button.config(state=tk.DISABLED)
+                self.disconnect_button.config(state=tk.NORMAL)
+                self.start_button.config(state=tk.NORMAL)
+                self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
+                time.sleep(1)
+                self.atualizar_ativos_disponiveis()
+            else:
+                self.log(f"Falha na conexão: {reason}")
+                messagebox.showerror("Erro", f"Falha na conexão: {reason}")
+                self.connected = False
+                self.connect_button.config(state=tk.NORMAL)
+                self.disconnect_button.config(state=tk.DISABLED)
+        except Exception as e:
+            self.log(f"Erro na conexão: {str(e)}")
+            messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
+            self.connected = False
+            self.connect_button.config(state=tk.NORMAL)
+            self.disconnect_button.config(state=tk.DISABLED)
+
+    def desconectar(self):
+        if self.api:
+            try:
+                self.api.close()
+            except Exception:
+                pass
+        self.api = None
+        self.connected = False
+        self.status_label.config(text="Desconectado", foreground="red")
+        self.connect_button.config(state=tk.NORMAL)
+        self.disconnect_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.DISABLED)
+        self.log("Desconectado da corretora.")
 
     def atualizar_saldo(self):
         try:
@@ -202,29 +255,76 @@ class IQFimatheBot:
             return self.api.check_connect()
         return False
 
-    def desconectar(self):
-        if self.api:
-            try:
-                self.api.close()
-            except Exception:
-                pass
-        self.api = None
-        self.connected = False
-        self.status_label.config(text="Desconectado", foreground="red")
-        self.connect_button.config(state=tk.NORMAL)
-        self.disconnect_button.config(state=tk.DISABLED)
-        self.start_button.config(state=tk.DISABLED)
-        self.log("Desconectado da corretora.")
+    # ---------- Ativos (Otimizado) ----------
+
+    def atualizar_ativos_disponiveis(self):
+        self.ativos_listbox.delete(0, tk.END)
+        self.ativos_listbox.insert(tk.END, "Carregando...")
+        self.root.update()
+        threading.Thread(target=self._atualizar_ativos_worker, daemon=True).start()
+
+    def _atualizar_ativos_worker(self):
+        try:
+            if not self.api or not self.connected or not self.api.check_connect():
+                self.log("API não conectada ou conexão perdida para atualizar ativos.")
+                self.root.after(0, self.carregar_ativos)
+                return
+
+            open_times = self.api.get_all_open_time()
+            ativos = []
+            for ativo, data in open_times['binary'].items():
+                if ativo in ACTIVES:
+                if data['open']:
+                    if self.operar_otc.get():
+                        if ativo.endswith('-OTC'):
+                            ativos.append(ativo)
+                    else:
+                        if not ativo.endswith('-OTC'):
+                            ativos.append(ativo)
+            # Se não achou nada, pega todos abertos
+            if not ativos:
+                ativos = [a for a, d in open_times['binary'].items() if d['open']]
+            self.ativos_disponiveis = sorted(ativos)
+            self.root.after(0, self.carregar_ativos)
+            self.log(f"{len(self.ativos_disponiveis)} ativos disponíveis.")
+        except Exception as e:
+            self.log(f"Erro ao atualizar ativos: {str(e)}")
+            self.root.after(0, self.carregar_ativos)
+
+    def carregar_ativos(self):
+        self.ativos_listbox.delete(0, tk.END)
+        if not self.ativos_disponiveis:
+            self.ativos_listbox.insert(tk.END, "Nenhum ativo disponível")
+        else:
+            for ativo in self.ativos_disponiveis:
+                self.ativos_listbox.insert(tk.END, ativo)
+
+    def obter_ativos_selecionados(self):
+        return [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
+
+    # ---------- Log ----------
+
+    def log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+        try:
+            self.log_text.config(state=tk.NORMAL)
+            self.log_text.insert(tk.END, log_message)
+            self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+            logger.info(message)
+        except Exception as e:
+            print(f"Erro no log: {e}\n{log_message}")
+
+    # ---------- Indicadores ----------
 
     def compute_adx(self, candles, length=14):
         highs = np.array([c['max'] for c in candles])
         lows = np.array([c['min'] for c in candles])
         closes = np.array([c['close'] for c in candles])
-
         plus_dm = np.zeros_like(highs)
         minus_dm = np.zeros_like(highs)
         tr = np.zeros_like(highs)
-
         for i in range(1, len(highs)):
             up_move = highs[i] - highs[i-1]
             down_move = lows[i-1] - lows[i]
@@ -235,11 +335,9 @@ class IQFimatheBot:
                 abs(highs[i] - closes[i-1]),
                 abs(lows[i] - closes[i-1])
             )
-
         plus_di = np.zeros_like(highs)
         minus_di = np.zeros_like(highs)
         adx = np.zeros_like(highs)
-
         for i in range(length, len(highs)):
             sum_tr = np.sum(tr[i-length+1:i+1])
             sum_plus_dm = np.sum(plus_dm[i-length+1:i+1])
@@ -384,6 +482,8 @@ class IQFimatheBot:
             self.log(f"Erro ao verificar sinais Power Boss ADX/RSI para {ativo}: {str(e)}")
             return None
 
+    # ---------- Execução/Operações ----------
+
     def executar_operacao(self, ativo, sinal):
         try:
             if not self.api or not self.connected:
@@ -433,27 +533,17 @@ class IQFimatheBot:
                 for attempt in range(60):
                     try:
                         result = self.api.check_win_v4(op_id)
-                        if result is not None:
+                        if isinstance(result, tuple):
+                            _, result_val = result
+                        else:
+                            result_val = result
+
+                        if result_val is not None:
                             ativo = self.active_operations[op_id]['ativo']
-                            if result > 0:
+                            if result_val > 0:
                                 self.total_acertos += 1
                                 last_result = 'win'
-                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result:.2f})")
-                            else:
-                                self.total_erros += 1
-                                last_result = 'loss'
-                                self.log(f"Operação {op_id} em {ativo} finalizada: LOSS (valor: ${self.active_operations[op_id]['valor']:.2f})")
-                            self.update_operation_status(ativo, last_result, op_id)
-                            self.atualizar_estatisticas()
-                            del self.active_operations[op_id]
-                            break
-                        result_alt = self.api.check_win(op_id)
-                        if result_alt is not None:
-                            ativo = self.active_operations[op_id]['ativo']
-                            if result_alt > 0:
-                                self.total_acertos += 1
-                                last_result = 'win'
-                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result_alt:.2f})")
+                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result_val:.2f})")
                             else:
                                 self.total_erros += 1
                                 last_result = 'loss'
@@ -583,122 +673,13 @@ class IQFimatheBot:
     def parar_robo(self):
         motivo = "Manual" if self.running else "Automático"
         self.running = False
-        self.log(f"Encerrando operação: {motivo}. Verificando operações pendentes...")
-        try:
-            self.check_finished_operations()
-        except Exception as e:
-            self.log(f"Erro ao verificar operações pendentes: {str(e)}")
-        if self.active_operations:
-            self.log(f"Operações pendentes não finalizadas: {list(self.active_operations.keys())}")
+        self.log(f"Encerrando operação: {motivo}.")
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.status_label.config(text="Parado", foreground="red")
         self.log(f"=== OPERAÇÃO ENCERRADA === Motivo: {motivo}")
 
-    def conectar(self):
-        email = self.email_entry.get().strip()
-        senha = self.senha_entry.get().strip()
-        if not email or not senha:
-            messagebox.showerror("Erro", "Email e senha são obrigatórios")
-            return
-        self.log(f"Conectando como {email}...")
-        try:
-            self.api = IQ_Option(email, senha)
-            check, reason = self.api.connect()
-            if check:
-                self.conta_tipo = self.conta_combobox.get()
-                self.api.change_balance(self.conta_tipo)
-                self.connected = True
-                self.status_label.config(text="Conectado", foreground="green")
-                self.connect_button.config(state=tk.DISABLED)
-                self.disconnect_button.config(state=tk.NORMAL)
-                self.start_button.config(state=tk.NORMAL)
-                self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
-                time.sleep(1)
-                self.atualizar_ativos_disponiveis()
-                self.atualizar_ativos_periodicamente(60)  # Atualiza a lista de ativos a cada 60 segundos
-            else:
-                self.log(f"Falha na conexão: {reason}")
-                messagebox.showerror("Erro", f"Falha na conexão: {reason}")
-                self.connected = False
-                self.connect_button.config(state=tk.NORMAL)
-                self.disconnect_button.config(state=tk.DISABLED)
-        except Exception as e:
-            self.log(f"Erro na conexão: {str(e)}")
-            messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
-            self.connected = False
-            self.connect_button.config(state=tk.NORMAL)
-            self.disconnect_button.config(state=tk.DISABLED)
-
-    def atualizar_ativos_disponiveis(self):
-        try:
-            if not self.api:
-                self.log("Erro: API não inicializada.")
-                return
-            if not self.connected:
-                self.log("Erro: API não conectada.")
-                return
-            if not self.api.check_connect():
-                self.log("Erro: Conexão com a API perdida.")
-                return
-
-            open_times = self.api.get_all_open_time()
-            ativos = []
-            for ativo, data in open_times['binary'].items():
-                if data['open']:
-                    if self.operar_otc.get() or not ativo.endswith('-OTC'):
-                        ativos.append(ativo)
-            # Mostra todos abertos, com e sem sufixo '-op'
-            self.ativos_disponiveis = sorted(ativos)
-            self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
-            # Se nenhum selecionado válido, pega padrão
-            if not self.ativos_selecionados:
-                if "EURUSD-op" in self.ativos_disponiveis:
-                    self.ativos_selecionados = ["EURUSD-op"]
-                    self.log("Selecionado EURUSD-op como padrão")
-                elif "EURUSD-OTC" in self.ativos_disponiveis:
-                    self.ativos_selecionados = ["EURUSD-OTC"]
-                    self.log("Selecionado EURUSD-OTC como padrão")
-                elif "EURUSD" in self.ativos_disponiveis:
-                    self.ativos_selecionados = ["EURUSD"]
-                    self.log("Selecionado EURUSD como padrão")
-                elif self.ativos_disponiveis:
-                    self.ativos_selecionados = [self.ativos_disponiveis[0]]
-                    self.log(f"Selecionado {self.ativos_disponiveis[0]} como padrão")
-            self.carregar_ativos()
-            self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
-            self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
-        except Exception as e:
-            self.log(f"Erro ao atualizar ativos: {str(e)}")
-            if self.reconnect_api():
-                time.sleep(5)
-                self.atualizar_ativos_disponiveis()
-
-    def atualizar_ativos_periodicamente(self, interval=60):
-        if self.connected:
-            self.atualizar_ativos_disponiveis()
-            self.root.after(interval * 1000, self.atualizar_ativos_periodicamente)
-
-    def carregar_ativos(self):
-        self.ativos_listbox.delete(0, tk.END)
-        for ativo in sorted(self.ativos_disponiveis):
-            self.ativos_listbox.insert(tk.END, ativo)
-
-    def obter_ativos_selecionados(self):
-        selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
-        return selecionados
-
-    def log(self, message):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_message = f"[{timestamp}] {message}\n"
-        try:
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, log_message)
-            self.log_text.see(tk.END)
-            self.log_text.config(state=tk.DISABLED)
-            logger.info(message)
-        except Exception as e:
-            print(f"Erro no log: {e}\n{log_message}")
+    # ---------- Estatísticas ----------
 
     def atualizar_estatisticas(self):
         total_ops = sum(self.operacoes_realizadas.values())
@@ -758,6 +739,8 @@ class IQFimatheBot:
             info['soros_base_value'] = initial_value
             info['martingale_level'] = 0
             self.martingale_status.pop(ativo, None)
+
+    # ---------- Fechar ----------
 
     def on_closing(self):
         if messagebox.askokcancel("Sair", "Deseja realmente sair?"):
