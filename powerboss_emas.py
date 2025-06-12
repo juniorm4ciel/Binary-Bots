@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class IQFimatheBot:
     def __init__(self, root):
         self.root = root
-        self.root.title("Robô Power Boss ADX_RSI v1.0 - Junior Maciel")
+        self.root.title("Robô Power Boss EMA CROSS v1.0 - Junior Maciel")
         self.root.geometry("1000x800")
         self.root.resizable(False, False)
         self.api = None
@@ -255,7 +255,7 @@ class IQFimatheBot:
             return self.api.check_connect()
         return False
 
-    # ---------- Ativos (com correção de indentação) ----------
+    # ---------- Ativos (Otimizado) ----------
 
     def atualizar_ativos_disponiveis(self):
         self.ativos_listbox.delete(0, tk.END)
@@ -273,13 +273,14 @@ class IQFimatheBot:
             open_times = self.api.get_all_open_time()
             ativos = []
             for ativo, data in open_times['binary'].items():
-                if data['open']:		 
-                    if self.operar_otc.get():
-                        if ativo.endswith('-OTC'):
-                            ativos.append(ativo)
-                    else:
-                        if not ativo.endswith('-OTC'):
-                            ativos.append(ativo)
+                if ativo in ACTIVES:
+                    if data['open']:
+                        if self.operar_otc.get():
+                            if ativo.endswith('-OTC'):
+                                ativos.append(ativo)
+                        else:
+                            if not ativo.endswith('-OTC'):
+                                ativos.append(ativo)
             # Se não achou nada, pega todos abertos
             if not ativos:
                 ativos = [a for a, d in open_times['binary'].items() if d['open']]
@@ -315,170 +316,85 @@ class IQFimatheBot:
         except Exception as e:
             print(f"Erro no log: {e}\n{log_message}")
 
-    # ---------- Indicadores ----------
+    # ---------- Lógica EMA Cross ----------
 
-    def compute_adx(self, candles, length=14):
-        highs = np.array([c['max'] for c in candles])
-        lows = np.array([c['min'] for c in candles])
-        closes = np.array([c['close'] for c in candles])
-        plus_dm = np.zeros_like(highs)
-        minus_dm = np.zeros_like(highs)
-        tr = np.zeros_like(highs)
-        for i in range(1, len(highs)):
-            up_move = highs[i] - highs[i-1]
-            down_move = lows[i-1] - lows[i]
-            plus_dm[i] = up_move if up_move > down_move and up_move > 0 else 0
-            minus_dm[i] = down_move if down_move > up_move and down_move > 0 else 0
-            tr[i] = max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i-1]),
-                abs(lows[i] - closes[i-1])
-            )
-        plus_di = np.zeros_like(highs)
-        minus_di = np.zeros_like(highs)
-        adx = np.zeros_like(highs)
-        for i in range(length, len(highs)):
-            sum_tr = np.sum(tr[i-length+1:i+1])
-            sum_plus_dm = np.sum(plus_dm[i-length+1:i+1])
-            sum_minus_dm = np.sum(minus_dm[i-length+1:i+1])
-            plus_di[i] = 100 * (sum_plus_dm / sum_tr) if sum_tr != 0 else 0
-            minus_di[i] = 100 * (sum_minus_dm / sum_tr) if sum_tr != 0 else 0
-            dxs = []
-            for j in range(i-length+1, i+1):
-                den = plus_di[j] + minus_di[j]
-                dxs.append(abs(plus_di[j] - minus_di[j]) / den * 100 if den != 0 else 0)
-            adx[i] = np.mean(dxs)
-        adx_val = adx[-1] if len(adx) > 0 else 0
-        return adx_val
+    def calcular_ema(self, arr, period):
+        alpha = 2 / (period + 1)
+        result = [arr[0]]
+        for price in arr[1:]:
+            result.append(alpha * price + (1 - alpha) * result[-1])
+        return np.array(result)
 
-    def compute_rsi(self, candles, length=14):
-        closes = np.array([c['close'] for c in candles])
-        if len(closes) < length + 1:
-            return 50  # valor neutro
-        deltas = np.diff(closes)
-        seed = deltas[:length]
-        up = seed[seed >= 0].sum() / length
-        down = -seed[seed < 0].sum() / length
-        rs = up / down if down != 0 else 0
-        rsi = np.zeros_like(closes)
-        rsi[:length] = 100. - 100. / (1. + rs)
-        up_avg = up
-        down_avg = down
-        for i in range(length, len(closes)):
-            delta = deltas[i - 1]
-            upval = max(delta, 0)
-            downval = -min(delta, 0)
-            up_avg = (up_avg * (length - 1) + upval) / length
-            down_avg = (down_avg * (length - 1) + downval) / length
-            rs = up_avg / down_avg if down_avg != 0 else 0
-            rsi[i] = 100. - 100. / (1. + rs)
-        return rsi[-1] if len(rsi) > 0 else 50
-
-    def is_doji(self, c):
-        corpo = abs(c['close'] - c['open'])
-        total = c['max'] - c['min']
-        if total == 0:
-            return True
-        return corpo <= total * 0.1
-
-    def check_tiebreaker(self, candles):
-        c = lambda i: candles[i]['close']
-        o = lambda i: candles[i]['open']
-        padroes = [
-            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)>o(2) and c(3)<o(3) and c(4)<o(4) and c(5)<o(5), -1),
-            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)<o(2) and c(3)>o(3) and c(4)<o(4) and c(5)<o(5), -1),
-            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)<o(2) and c(3)<o(3) and c(4)>o(4) and c(5)<o(5), -1),
-            (lambda: c(0)>o(0) and c(1)>o(1) and c(2)<o(2) and c(3)<o(3) and c(4)<o(4) and c(5)>o(5), 1),
-            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)>o(2) and c(3)>o(3) and c(4)<o(4) and c(5)<o(5), -1),
-            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)>o(2) and c(3)<o(3) and c(4)>o(4) and c(5)<o(5), -1),
-            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)>o(2) and c(3)<o(3) and c(4)<o(4) and c(5)>o(5), 1),
-            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)<o(2) and c(3)>o(3) and c(4)>o(4) and c(5)<o(5), -1),
-            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)<o(2) and c(3)>o(3) and c(4)<o(4) and c(5)>o(5), 1),
-            (lambda: c(0)>o(0) and c(1)<o(1) and c(2)<o(2) and c(3)<o(3) and c(4)>o(4) and c(5)>o(5), 1)
-        ]
-        for cond, direcao in padroes:
-            try:
-                if cond():
-                    return direcao
-            except Exception:
-                continue
-        return 0
-
-    def verificar_sinais_powerboss(self, ativo):
+    def verificar_sinais_ema(self, ativo):
+        """
+        Analisa o ativo e retorna 'call', 'put' ou None, conforme critérios definidos:
+        - Menos de 10s para fechar a vela e vela a favor do sinal.
+        - Distância mínima entre EMAs de 0.10%.
+        - Cruzamento limpo.
+        - Inclinação mínima da EMA9 (0.01% do preço).
+        - Volume acima da média das últimas 20 velas.
+        """
         try:
             if not self.api or not self.connected:
                 self.log("API não inicializada.")
                 return None
 
             current_time = self.api.get_server_timestamp() if self.api else time.time()
-            candles = self.api.get_candles(ativo, 60, 20, current_time)
-            if candles is None or len(candles) < 20:
+            candles = self.api.get_candles(ativo, 60, 120, current_time)  # 120 para garantir cálculo da EMA100
+            if candles is None or len(candles) < 102:
+                self.log(f"{ativo}: Não há velas suficientes para análise.")
                 return None
             candles = sorted(candles, key=lambda x: x['from'])
-            adx_len = 14
-            adx_thresh = 25.0
-            adx_val = self.compute_adx(candles, length=adx_len)
+            closes = np.array([c['close'] for c in candles])
+            volumes = np.array([c.get('volume', 0) for c in candles])
 
-            self.log(f"{ativo}: ADX={adx_val:.2f}")
+            ema9 = self.calcular_ema(closes, 9)
+            ema100 = self.calcular_ema(closes, 100)
+            preco_atual = closes[-1]
 
-            prev_status = self.market_status.get(ativo)
-            if adx_val >= adx_thresh:
-                new_status = "trend"
+            # Critério 1 - Distância mínima entre EMAs
+            distancia = abs(ema9[-1] - ema100[-1])
+            if distancia < preco_atual * 0.001:
+                self.log(f"{ativo}: EMAs coladas ({distancia:.5f} < {preco_atual * 0.001:.5f}) - sem sinal.")
+                return None
+
+            # Critério 2 - Cruzamento limpo
+            cruzou_baixo_cima = ema9[-2] < ema100[-2] and ema9[-1] > ema100[-1]
+            cruzou_cima_baixo = ema9[-2] > ema100[-2] and ema9[-1] < ema100[-1]
+            if not (cruzou_baixo_cima or cruzou_cima_baixo):
+                return None
+
+            # Critério 3 - Inclinação EMA9
+            inclinacao = abs(ema9[-1] - ema9[-2])
+            if inclinacao < preco_atual * 0.0001:
+                self.log(f"{ativo}: Inclinação EMA9 baixa ({inclinacao:.5f} < {preco_atual * 0.0001:.5f}) - sem sinal.")
+                return None
+
+            # Critério 4 - Volume acima da média das últimas 20 velas
+            vol_media = np.mean(volumes[-21:-1])
+            if volumes[-1] <= vol_media:
+                self.log(f"{ativo}: Volume {volumes[-1]:.2f} abaixo da média {vol_media:.2f} - sem sinal.")
+                return None
+
+            # Critério 5 - Menos de 10 segundos para fechar a vela atual e vela a favor do sinal
+            candle_atual = candles[-1]
+            tempo_restante = candle_atual['to'] - int(time.time())
+            if tempo_restante > 10:
+                return None
+
+            if cruzou_baixo_cima and candle_atual['close'] > candle_atual['open']:
+                self.log(f"{ativo}: Sinal de CALL DETECTADO! (Cruzamento EMA9↑EMA100, Vela de alta, volume acima da média, faltam {tempo_restante}s).")
+                self.last_signal_bar[ativo] = candle_atual['from'] // 60
+                return 'call'
+            elif cruzou_cima_baixo and candle_atual['close'] < candle_atual['open']:
+                self.log(f"{ativo}: Sinal de PUT DETECTADO! (Cruzamento EMA9↓EMA100, Vela de baixa, volume acima da média, faltam {tempo_restante}s).")
+                self.last_signal_bar[ativo] = candle_atual['from'] // 60
+                return 'put'
             else:
-                new_status = "consolidated"
-            if prev_status != new_status:
-                if new_status == "trend":
-                    self.log(f"{ativo}: Mercado em tendência forte (ADX={adx_val:.2f}) - NÃO operável.")
-                else:
-                    self.log(f"{ativo}: Mercado consolidado (ADX={adx_val:.2f}) - Operável.")
-                self.market_status[ativo] = new_status
-
-            if adx_val >= adx_thresh:
+                self.log(f"{ativo}: Cruzamento validado, mas vela não está a favor do sinal.")
                 return None
-
-            last_bar = self.last_signal_bar.get(ativo, -100)
-            current_bar = candles[-1]['from'] // 60
-            if current_bar - last_bar < 12:
-                return None
-
-            last6 = candles[-6:]
-            up = sum(1 for c in last6 if c['close'] > c['open'])
-            down = sum(1 for c in last6 if c['close'] < c['open'])
-            doji_indexes = [i for i, c in enumerate(last6) if self.is_doji(c)]
-
-            msg_velas = f"{ativo}: Velas analisadas - Altas: {up}, Baixas: {down}."
-            if doji_indexes:
-                msg_velas += f" Encontrado doji na(s) vela(s): {', '.join(str(i+1) for i in doji_indexes)}. NÃO operável."
-                self.log(msg_velas)
-                return None
-            elif up == down:
-                msg_velas += " Empate de velas. NÃO operável."
-                self.log(msg_velas)
-                return None
-            else:
-                direction = 1 if up > down else -1 if down > up else self.check_tiebreaker(last6)
-                msg_velas += f" Sinal detectado: {'CALL' if direction == 1 else 'PUT' if direction == -1 else 'NENHUM'}."
-                self.log(msg_velas)
-
-            rsi_len = 14
-            rsi_val = self.compute_rsi(candles, length=rsi_len)
-            sobrecompra = 70
-            sobrevenda = 30
-            if direction == 1 and rsi_val >= sobrecompra:
-                self.log(f"{ativo}: RSI {rsi_val:.2f} BLOQUEANDO ENTRADA DE CALL (SOBRECOMPRA).")
-                return None
-            elif direction == -1 and rsi_val <= sobrevenda:
-                self.log(f"{ativo}: RSI {rsi_val:.2f} BLOQUEANDO ENTRADA DE PUT (SOBREVENDA).")
-                return None
-            elif direction != 0:
-                self.log(f"{ativo}: RSI={rsi_val:.2f} - Nenhum bloqueio para a direção {'CALL' if direction==1 else 'PUT'}.")
-
-            if direction != 0:
-                self.last_signal_bar[ativo] = current_bar
-                return 'call' if direction == 1 else 'put'
-            return None
         except Exception as e:
-            self.log(f"Erro ao verificar sinais Power Boss ADX/RSI para {ativo}: {str(e)}")
+            self.log(f"Erro ao verificar sinais EMA Cross para {ativo}: {str(e)}")
             return None
 
     # ---------- Execução/Operações ----------
@@ -506,10 +422,8 @@ class IQFimatheBot:
                 return True
             else:
                 self.log(f"Falha ao executar operação em {ativo}: {operation_id}")
-                msg = str(operation_id).lower()
-                if 'active is suspended' in msg or 'not available at the moment' in msg:
+                if 'active is suspended' in str(operation_id).lower():
                     self.suspended_assets.add(ativo)
-                    self.log(f"{ativo} suspenso para novas operações temporariamente.")
                 return False
         except Exception as e:
             self.log(f"Erro ao executar operação em {ativo}: {str(e)}")
@@ -661,7 +575,7 @@ class IQFimatheBot:
                         time.sleep(1 if ciclo_rapido else 5)
                     continue
                 if not self.existe_operacao_pendente(ativo):
-                    sinal = self.verificar_sinais_powerboss(ativo)
+                    sinal = self.verificar_sinais_ema(ativo)
                     if sinal:
                         self.log(f"Sinal {sinal.upper()} em {ativo}, tentando executar operação")
                         if self.executar_operacao(ativo, sinal):
