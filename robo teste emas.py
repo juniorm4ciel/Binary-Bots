@@ -7,7 +7,6 @@ import logging
 import sys
 import threading
 import numpy as np
-from iqoptionapi.constants import ACTIVES
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -188,6 +187,9 @@ class IQFimatheBot:
                 self.disconnect_button.config(state=tk.NORMAL)
                 self.start_button.config(state=tk.NORMAL)
                 self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
+                self.custom_assets = self.api.get_all_ACTIVES_OPCODE()
+                self.custom_assets["EURAUD-OTC"] = 77
+                self.custom_assets["EURCAD-OTC"] = 78
                 time.sleep(1)
                 self.atualizar_ativos_disponiveis()
             else:
@@ -255,49 +257,43 @@ class IQFimatheBot:
             return self.api.check_connect()
         return False
 
-    # ---------- Ativos (Otimizado) ----------
-
     def atualizar_ativos_disponiveis(self):
-        self.ativos_listbox.delete(0, tk.END)
-        self.ativos_listbox.insert(tk.END, "Carregando...")
-        self.root.update()
-        threading.Thread(target=self._atualizar_ativos_worker, daemon=True).start()
-
-    def _atualizar_ativos_worker(self):
         try:
-            if not self.api or not self.connected or not self.api.check_connect():
-                self.log("API não conectada ou conexão perdida para atualizar ativos.")
-                self.root.after(0, self.carregar_ativos)
+            if not self.api:
+                self.log("Erro: API não inicializada.")
                 return
-
-            open_times = self.api.get_all_open_time()
-            ativos = []
-            for ativo, data in open_times['binary'].items():
-                if ativo in ACTIVES:
-                    if data['open']:
-                        if self.operar_otc.get():
-                            if ativo.endswith('-OTC'):
-                                ativos.append(ativo)
-                        else:
-                            if not ativo.endswith('-OTC'):
-                                ativos.append(ativo)
-            # Se não achou nada, pega todos abertos
-            if not ativos:
-                ativos = [a for a, d in open_times['binary'].items() if d['open']]
-            self.ativos_disponiveis = sorted(ativos)
-            self.root.after(0, self.carregar_ativos)
-            self.log(f"{len(self.ativos_disponiveis)} ativos disponíveis.")
+            if not self.connected:
+                self.log("Erro: API não conectada.")
+                return
+            if not self.api.check_connect():
+                self.log("Erro: Conexão com a API perdida.")
+                return
+            try:
+                activos = self.api.get_all_ACTIVES_OPCODE()
+                if activos:
+                    novos_ativos = [ativo for ativo in activos.keys() if self.operar_otc.get() or not ativo.endswith('-OTC')]
+                else:
+                    novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
+            except Exception as fallback_error:
+                novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
+            self.ativos_disponiveis = sorted(novos_ativos)
+            self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
+            if not self.ativos_selecionados and "EURUSD-OTC" in self.ativos_disponiveis:
+                self.ativos_selecionados = ["EURUSD-OTC"]
+                self.log("Selecionado EURUSD-OTC como padrão")
+            self.carregar_ativos()
+            self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
+            self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
         except Exception as e:
             self.log(f"Erro ao atualizar ativos: {str(e)}")
-            self.root.after(0, self.carregar_ativos)
+            if self.reconnect_api():
+                time.sleep(5)
+                self.atualizar_ativos_disponiveis()
 
     def carregar_ativos(self):
         self.ativos_listbox.delete(0, tk.END)
-        if not self.ativos_disponiveis:
-            self.ativos_listbox.insert(tk.END, "Nenhum ativo disponível")
-        else:
-            for ativo in self.ativos_disponiveis:
-                self.ativos_listbox.insert(tk.END, ativo)
+        for ativo in sorted(self.ativos_disponiveis):
+            self.ativos_listbox.insert(tk.END, ativo)
 
     def obter_ativos_selecionados(self):
         return [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
@@ -326,14 +322,6 @@ class IQFimatheBot:
         return np.array(result)
 
     def verificar_sinais_ema(self, ativo):
-        """
-        Estratégia FLEXIBILIZADA:
-        - Não exige distância mínima entre EMAs.
-        - Não exige cruzamento limpo (aceita qualquer cruzamento).
-        - Não exige inclinação mínima.
-        - Não exige volume acima da média.
-        - Só entra se faltar até 20 segundos para fechar a vela E a vela for a favor do sinal.
-        """
         try:
             if not self.api or not self.connected:
                 self.log("API não inicializada.")
@@ -342,26 +330,45 @@ class IQFimatheBot:
             current_time = self.api.get_server_timestamp() if self.api else time.time()
             candles = self.api.get_candles(ativo, 60, 120, current_time)
             if candles is None or len(candles) < 102:
+                self.log(f"{ativo}: Não há candles suficientes para análise ({len(candles) if candles else 0}/102).")
                 return None
             candles = sorted(candles, key=lambda x: x['from'])
             closes = np.array([c['close'] for c in candles])
             ema9 = self.calcular_ema(closes, 9)
             ema100 = self.calcular_ema(closes, 100)
 
+            distancia_ema = abs(ema9[-1] - ema100[-1])
+            self.log(f"{ativo}: Distância EMA9/EMA100 agora: {distancia_ema:.5f}")
+
             cruzou_baixo_cima = ema9[-2] < ema100[-2] and ema9[-1] > ema100[-1]
             cruzou_cima_baixo = ema9[-2] > ema100[-2] and ema9[-1] < ema100[-1]
             candle_atual = candles[-1]
             tempo_restante = candle_atual['to'] - int(time.time())
+
             if tempo_restante > 20:
+                self.log(f"{ativo}: Ainda faltam {tempo_restante}s para fechar a vela. Aguardar até <=20s. Não entra.")
                 return None
 
-            if cruzou_baixo_cima and candle_atual['close'] > candle_atual['open']:
-                self.log(f"{ativo}: Sinal de CALL! Cruzamento EMA9↑EMA100, vela de alta, faltam {tempo_restante}s.")
-                return 'call'
-            elif cruzou_cima_baixo and candle_atual['close'] < candle_atual['open']:
-                self.log(f"{ativo}: Sinal de PUT! Cruzamento EMA9↓EMA100, vela de baixa, faltam {tempo_restante}s.")
-                return 'put'
-            return None
+            if cruzou_baixo_cima:
+                if candle_atual['close'] > candle_atual['open']:
+                    self.log(f"{ativo}: Sinal de CALL! Cruzamento EMA9↑EMA100, vela de alta, faltam {tempo_restante}s.")
+                    return 'call'
+                else:
+                    self.log(f"{ativo}: Cruzamento de compra, mas a vela está de baixa (close={candle_atual['close']}, open={candle_atual['open']}). Não entra.")
+                    return None
+            elif cruzou_cima_baixo:
+                if candle_atual['close'] < candle_atual['open']:
+                    self.log(f"{ativo}: Sinal de PUT! Cruzamento EMA9↓EMA100, vela de baixa, faltam {tempo_restante}s.")
+                    return 'put'
+                else:
+                    self.log(f"{ativo}: Cruzamento de venda, mas a vela está de alta (close={candle_atual['close']}, open={candle_atual['open']}). Não entra.")
+                    return None
+            else:
+                self.log(
+                    f"{ativo}: Não houve cruzamento de EMAs nesta vela. "
+                    f"(EMA9[-2]={ema9[-2]:.5f}, EMA100[-2]={ema100[-2]:.5f}, EMA9[-1]={ema9[-1]:.5f}, EMA100[-1]={ema100[-1]:.5f})"
+                )
+                return None
         except Exception as e:
             self.log(f"Erro ao verificar sinais EMA Cross Flex para {ativo}: {str(e)}")
             return None
