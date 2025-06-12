@@ -34,12 +34,9 @@ class IQFimatheBot:
         self.custom_assets = {}
         self.martingale_status = {}
         self.market_status = {}
-        self.consts = None
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-
-    # ---------- UI ----------
 
     def setup_styles(self):
         style = ttk.Style()
@@ -129,8 +126,6 @@ class IQFimatheBot:
         self.saldo_label.grid(row=11, column=1, sticky="w", pady=2)
         self.update_saldo_button = ttk.Button(config_frame, text="Atualizar Saldo", command=self.atualizar_saldo)
         self.update_saldo_button.grid(row=11, column=2, sticky="w", padx=5)
-        self.update_assets_button = ttk.Button(config_frame, text="Atualizar Ativos", command=self.atualizar_ativos_disponiveis)
-        self.update_assets_button.grid(row=11, column=3, sticky="w", padx=5)
 
         # Controle
         control_frame = ttk.Frame(main_frame)
@@ -166,7 +161,21 @@ class IQFimatheBot:
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
 
-    # ---------- Conexão e API ----------
+    # ---------- LOG ----------
+
+    def log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+        try:
+            self.log_text.config(state=tk.NORMAL)
+            self.log_text.insert(tk.END, log_message)
+            self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+            logger.info(message)
+        except Exception as e:
+            print(f"Erro no log: {e}\n{log_message}")
+
+    # ---------- CONEXÃO E API ----------
 
     def conectar(self):
         email = self.email_entry.get().strip()
@@ -257,6 +266,8 @@ class IQFimatheBot:
             return self.api.check_connect()
         return False
 
+    # ---------- ATIVOS ----------
+
     def atualizar_ativos_disponiveis(self):
         try:
             if not self.api:
@@ -296,21 +307,8 @@ class IQFimatheBot:
             self.ativos_listbox.insert(tk.END, ativo)
 
     def obter_ativos_selecionados(self):
-        return [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
-
-    # ---------- Log ----------
-
-    def log(self, message):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_message = f"[{timestamp}] {message}\n"
-        try:
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, log_message)
-            self.log_text.see(tk.END)
-            self.log_text.config(state=tk.DISABLED)
-            logger.info(message)
-        except Exception as e:
-            print(f"Erro no log: {e}\n{log_message}")
+        selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
+        return selecionados
 
     # ---------- EMA CROSS FLEX ----------
 
@@ -373,7 +371,7 @@ class IQFimatheBot:
             self.log(f"Erro ao verificar sinais EMA Cross Flex para {ativo}: {str(e)}")
             return None
 
-    # ---------- Execução/Operações ----------
+    # ---------- EXECUÇÃO/OPERAÇÕES E RESTANTE DO ROBÔ (SEM ALTERAÇÃO) ----------
 
     def executar_operacao(self, ativo, sinal):
         try:
@@ -423,18 +421,28 @@ class IQFimatheBot:
             for op_id in list(self.active_operations.keys()):
                 for attempt in range(60):
                     try:
-                        result = self.api.check_win_v4(op_id)
-                        if isinstance(result, tuple):
-                            _, result_val = result
-                        else:
-                            result_val = result
-
-                        if result_val is not None:
+                        result = self.api.check_win_v3(op_id)
+                        if result is not None:
                             ativo = self.active_operations[op_id]['ativo']
-                            if result_val > 0:
+                            if result > 0:
                                 self.total_acertos += 1
                                 last_result = 'win'
-                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result_val:.2f})")
+                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result:.2f})")
+                            else:
+                                self.total_erros += 1
+                                last_result = 'loss'
+                                self.log(f"Operação {op_id} em {ativo} finalizada: LOSS (valor: ${self.active_operations[op_id]['valor']:.2f})")
+                            self.update_operation_status(ativo, last_result, op_id)
+                            self.atualizar_estatisticas()
+                            del self.active_operations[op_id]
+                            break
+                        result_alt = self.api.check_win(op_id)
+                        if result_alt is not None:
+                            ativo = self.active_operations[op_id]['ativo']
+                            if result_alt > 0:
+                                self.total_acertos += 1
+                                last_result = 'win'
+                                self.log(f"Operação {op_id} em {ativo} finalizada: WIN (lucro: ${result_alt:.2f})")
                             else:
                                 self.total_erros += 1
                                 last_result = 'loss'
@@ -564,13 +572,17 @@ class IQFimatheBot:
     def parar_robo(self):
         motivo = "Manual" if self.running else "Automático"
         self.running = False
-        self.log(f"Encerrando operação: {motivo}.")
+        self.log(f"Encerrando operação: {motivo}. Verificando operações pendentes...")
+        try:
+            self.check_finished_operations()
+        except Exception as e:
+            self.log(f"Erro ao verificar operações pendentes: {str(e)}")
+        if self.active_operations:
+            self.log(f"Operações pendentes não finalizadas: {list(self.active_operations.keys())}")
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.status_label.config(text="Parado", foreground="red")
         self.log(f"=== OPERAÇÃO ENCERRADA === Motivo: {motivo}")
-
-    # ---------- Estatísticas ----------
 
     def atualizar_estatisticas(self):
         total_ops = sum(self.operacoes_realizadas.values())
@@ -630,8 +642,6 @@ class IQFimatheBot:
             info['soros_base_value'] = initial_value
             info['martingale_level'] = 0
             self.martingale_status.pop(ativo, None)
-
-    # ---------- Fechar ----------
 
     def on_closing(self):
         if messagebox.askokcancel("Sair", "Deseja realmente sair?"):
