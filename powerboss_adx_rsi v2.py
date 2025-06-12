@@ -126,6 +126,9 @@ class IQFimatheBot:
         self.saldo_label.grid(row=11, column=1, sticky="w", pady=2)
         self.update_saldo_button = ttk.Button(config_frame, text="Atualizar Saldo", command=self.atualizar_saldo)
         self.update_saldo_button.grid(row=11, column=2, sticky="w", padx=5)
+        # Botão para atualizar ativos manualmente
+        self.update_assets_button = ttk.Button(config_frame, text="Atualizar Ativos", command=self.atualizar_ativos_disponiveis)
+        self.update_assets_button.grid(row=11, column=3, sticky="w", padx=5)
 
         # Controle
         control_frame = ttk.Frame(main_frame)
@@ -429,7 +432,7 @@ class IQFimatheBot:
             for op_id in list(self.active_operations.keys()):
                 for attempt in range(60):
                     try:
-                        result = self.api.check_win_v3(op_id)
+                        result = self.api.check_win_v4(op_id)
                         if result is not None:
                             ativo = self.active_operations[op_id]['ativo']
                             if result > 0:
@@ -480,8 +483,15 @@ class IQFimatheBot:
             return
         self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
         if not self.ativos_selecionados:
-            self.ativos_selecionados = ["EURUSD-OTC"]
-            self.log("Nenhum ativo válido selecionado. Usando EURUSD-OTC como padrão.")
+            if "EURUSD-op" in self.ativos_disponiveis:
+                self.ativos_selecionados = ["EURUSD-op"]
+            elif "EURUSD-OTC" in self.ativos_disponiveis:
+                self.ativos_selecionados = ["EURUSD-OTC"]
+            elif "EURUSD" in self.ativos_disponiveis:
+                self.ativos_selecionados = ["EURUSD"]
+            else:
+                self.ativos_selecionados = self.ativos_disponiveis[:1] if self.ativos_disponiveis else []
+            self.log("Nenhum ativo válido selecionado. Usando ativo padrão.")
         initial_value = float(self.valor_entry.get())
         self.operacoes_per_ativo = {
             ativo: {
@@ -606,6 +616,7 @@ class IQFimatheBot:
                 self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
                 time.sleep(1)
                 self.atualizar_ativos_disponiveis()
+                self.atualizar_ativos_periodicamente(60)  # Atualiza a lista de ativos a cada 60 segundos
             else:
                 self.log(f"Falha na conexão: {reason}")
                 messagebox.showerror("Erro", f"Falha na conexão: {reason}")
@@ -637,11 +648,23 @@ class IQFimatheBot:
                 if data['open']:
                     if self.operar_otc.get() or not ativo.endswith('-OTC'):
                         ativos.append(ativo)
+            # Mostra todos abertos, com e sem sufixo '-op'
             self.ativos_disponiveis = sorted(ativos)
             self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
-            if not self.ativos_selecionados and "EURUSD-OTC" in self.ativos_disponiveis:
-                self.ativos_selecionados = ["EURUSD-OTC"]
-                self.log("Selecionado EURUSD-OTC como padrão")
+            # Se nenhum selecionado válido, pega padrão
+            if not self.ativos_selecionados:
+                if "EURUSD-op" in self.ativos_disponiveis:
+                    self.ativos_selecionados = ["EURUSD-op"]
+                    self.log("Selecionado EURUSD-op como padrão")
+                elif "EURUSD-OTC" in self.ativos_disponiveis:
+                    self.ativos_selecionados = ["EURUSD-OTC"]
+                    self.log("Selecionado EURUSD-OTC como padrão")
+                elif "EURUSD" in self.ativos_disponiveis:
+                    self.ativos_selecionados = ["EURUSD"]
+                    self.log("Selecionado EURUSD como padrão")
+                elif self.ativos_disponiveis:
+                    self.ativos_selecionados = [self.ativos_disponiveis[0]]
+                    self.log(f"Selecionado {self.ativos_disponiveis[0]} como padrão")
             self.carregar_ativos()
             self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
             self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
@@ -650,6 +673,11 @@ class IQFimatheBot:
             if self.reconnect_api():
                 time.sleep(5)
                 self.atualizar_ativos_disponiveis()
+
+    def atualizar_ativos_periodicamente(self, interval=60):
+        if self.connected:
+            self.atualizar_ativos_disponiveis()
+            self.root.after(interval * 1000, self.atualizar_ativos_periodicamente)
 
     def carregar_ativos(self):
         self.ativos_listbox.delete(0, tk.END)
