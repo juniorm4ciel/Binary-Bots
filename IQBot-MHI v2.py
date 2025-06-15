@@ -60,6 +60,7 @@ class RoboThread(threading.Thread):
         self.signals = signals
         self.stop_flag = False
         self.last_signal_time = {}
+        self.martingale_status = {}
 
     def catalogar_mhi_classico(self, candles, ativo):
         """
@@ -76,7 +77,7 @@ class RoboThread(threading.Thread):
         repetiu_maj = 0
         total = 0
 
-        for i in range(0, 60, 3):  # de 0 a 57, pulando de 3 em 3
+        for i in range(0, 60, 3):
             grupo = candles[i:i+3]
             if len(grupo) < 3:
                 break
@@ -163,6 +164,53 @@ class RoboThread(threading.Thread):
                 if self.stop_flag:
                     break
 
+                # 1. Executar Martingale se necessário, SEM checar ADX
+                mg = self.martingale_status.get(ativo)
+                if mg:
+                    now = datetime.datetime.now()
+                    if now.second == 0:
+                        self.signals.log_signal.emit(f"Executando MARTINGALE {mg['nivel']} em {ativo}, direção {mg['direcao'].upper()}, valor ${mg['valor']:.2f}")
+                        saldo = self.api.get_balance()
+                        if saldo < mg['valor']:
+                            self.signals.log_signal.emit(f"Erro: Saldo insuficiente para Martingale em {ativo}.")
+                            self.martingale_status.pop(ativo, None)
+                            continue
+                        check, operation_id = self.api.buy(mg['valor'], ativo, mg['direcao'], mg['exp'])
+                        if check:
+                            self.operacoes_realizadas[ativo] += 1
+                            self.last_signal_time[ativo] = (now.hour, now.minute)
+                            self.signals.log_signal.emit(f"Martingale iniciado: {mg['direcao'].upper()} em {ativo} valor ${mg['valor']:.2f} expiração {mg['exp']}min. ID: {operation_id}")
+                            # Espera resultado do MG
+                            for _ in range(60):
+                                if self.stop_flag:
+                                    break
+                                try:
+                                    result = self.api.check_win_v3(operation_id)
+                                    if result is not None and result != operation_id:
+                                        break
+                                except Exception:
+                                    pass
+                                time.sleep(1)
+                            try:
+                                result = self.api.check_win_v3(operation_id)
+                            except Exception:
+                                result = None
+                            total_ops += 1
+                            if result is not None and result > 0:
+                                wins += 1
+                                self.signals.log_signal.emit(f"Martingale {operation_id} em {ativo}: WIN (lucro: ${result:.2f})")
+                                self.martingale_status.pop(ativo, None)
+                            else:
+                                losses += 1
+                                self.signals.log_signal.emit(f"Martingale {operation_id} em {ativo}: LOSS (valor: ${mg['valor']:.2f})")
+                                self.martingale_status.pop(ativo, None)
+                            taxa = (wins / total_ops) * 100 if total_ops > 0 else 0
+                            self.signals.stats_signal.emit(total_ops, wins, losses, taxa)
+                        else:
+                            self.signals.log_signal.emit(f"Falha ao executar Martingale em {ativo}: {operation_id}")
+                            self.martingale_status.pop(ativo, None)
+                    continue  # Não faz entrada normal se MG pendente
+
                 now = datetime.datetime.now()
                 current_cycle = (now.hour, now.minute // 5)
                 if self.last_signal_time.get(ativo) == current_cycle:
@@ -229,6 +277,13 @@ class RoboThread(threading.Thread):
                     else:
                         losses += 1
                         self.signals.log_signal.emit(f"Operação {operation_id} em {ativo} finalizada: LOSS (valor: ${valor:.2f})")
+                        # Prepara Martingale
+                        self.martingale_status[ativo] = {
+                            'nivel': 1,
+                            'direcao': sinal,
+                            'valor': valor*2,
+                            'exp': exp
+                        }
                     taxa = (wins / total_ops) * 100 if total_ops > 0 else 0
                     self.signals.stats_signal.emit(total_ops, wins, losses, taxa)
                     if self.operacoes_realizadas[ativo] >= max_entradas:

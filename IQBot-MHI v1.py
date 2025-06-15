@@ -636,6 +636,10 @@ class IQFimatheBot:
                         'nivel': info['martingale_level'],
                         'ciclo_mg': None
                     }
+                    # === INÍCIO PATCH: execução imediata do Martingale ===
+                    # Executa imediatamente a operação Martingale na mesma direção do LOSS
+                    threading.Thread(target=self.executar_operacao, args=(ativo, last_op['sinal'])).start()
+                    # === FIM PATCH ===
             else:
                 info['current_value'] = initial_value
                 info['soros_base_value'] = initial_value
