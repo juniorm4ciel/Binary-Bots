@@ -81,8 +81,10 @@ class IQFimatheBot:
         self.lock_ops = threading.Lock()
         self.ativo_locks = {}
         self.last_suspended_check = {}
-        self.adx_period = 14  # fixo, não mostrado na interface
-        self.adx_limiar = 20  # fixo, não mostrado na interface
+        self.ultimo_ciclo_operado = {}
+        self.adx_period = 14
+        self.adx_limiar = 20
+        self.usar_adx = tk.BooleanVar(value=True)
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -171,6 +173,8 @@ class IQFimatheBot:
         self.saldo_label.grid(row=11, column=1, sticky="w", pady=2)
         self.update_saldo_button = ttk.Button(config_frame, text="Atualizar Saldo", command=self.atualizar_saldo)
         self.update_saldo_button.grid(row=11, column=2, sticky="w", padx=5)
+        self.adx_check = ttk.Checkbutton(config_frame, text="Usar filtro ADX (período 14, limiar 20)", variable=self.usar_adx)
+        self.adx_check.grid(row=12, column=0, columnspan=3, sticky="w", pady=2)
         control_frame = ttk.Frame(main_frame)
         control_frame.grid(row=2, column=0, pady=10)
         self.start_button = ttk.Button(control_frame, text="Iniciar Robô", command=self.iniciar_robo, state=tk.DISABLED)
@@ -199,7 +203,6 @@ class IQFimatheBot:
         self.log_text.pack(fill=tk.BOTH, expand=True)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
-
     def atualizar_saldo(self):
         try:
             if not self.api or not self.connected:
@@ -478,7 +481,6 @@ class IQFimatheBot:
                             del self.active_operations[op_id]
         except Exception as e:
             self.log(f"Erro ao verificar operações finalizadas: {str(e)}")
-
     def get_current_value(self, ativo):
         return self.operacoes_per_ativo.get(ativo, {'current_value': float(self.valor_entry.get())})['current_value']
 
@@ -634,12 +636,8 @@ class IQFimatheBot:
                     self.martingale_status[ativo] = {
                         'direcao': last_op['sinal'],
                         'nivel': info['martingale_level'],
-                        'ciclo_mg': None
+                        'pending': True
                     }
-                    # === INÍCIO PATCH: execução imediata do Martingale ===
-                    # Executa imediatamente a operação Martingale na mesma direção do LOSS
-                    threading.Thread(target=self.executar_operacao, args=(ativo, last_op['sinal'])).start()
-                    # === FIM PATCH ===
             else:
                 info['current_value'] = initial_value
                 info['soros_base_value'] = initial_value
@@ -690,6 +688,7 @@ class IQFimatheBot:
         self.running = True
         self.ativo_locks = {ativo: threading.Lock() for ativo in self.ativos_selecionados}
         self.last_suspended_check = {}
+        self.ultimo_ciclo_operado = {}
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.status_label.config(text="Operando", foreground="green")
@@ -732,18 +731,19 @@ class IQFimatheBot:
 
     def loop_operacoes_primeiro_ciclo(self):
         self.loop_operacoes(ciclo_rapido=True)
+    def get_cycle_key(self, dt=None):
+        if dt is None:
+            dt = datetime.datetime.now(datetime.timezone.utc)
+        return f"{dt.year}-{dt.month}-{dt.day} {dt.hour}:{(dt.minute // 5) * 5:02d}"
 
     def loop_operacoes(self, ciclo_rapido=False):
-        adx_period = 14
-        adx_limiar = 20
+        adx_period = self.adx_period
+        adx_limiar = self.adx_limiar
 
         max_entradas = int(self.entradas_spinbox.get())
         lucro_alvo = float(self.lucro_entry.get()) if self.lucro_entry.get() else float('inf')
         perda_alvo = float(self.perda_entry.get()) if self.perda_entry.get() else float('inf')
         saldo_inicial = self.api.get_balance() if self.api else 0
-
-        last_cycle = {ativo: None for ativo in self.ativos_selecionados}
-        ultimo_sinal_operado = {}
 
         while self.running:
             if self.lucro_stop_loss_var.get():
@@ -763,11 +763,22 @@ class IQFimatheBot:
                 return
 
             for ativo in self.ativos_selecionados:
-                if not self.running:
-                    break
                 with self.ativo_locks[ativo]:
                     now = datetime.datetime.now(datetime.timezone.utc)
                     now_ts = time.time()
+                    current_cycle = self.get_cycle_key(now)
+
+                    if self.martingale_status.get(ativo, {}).get('pending', False):
+                        direcao = self.martingale_status[ativo]['direcao']
+                        self.log(f"Executando Martingale em {ativo} ignorando trava de ciclo (direção: {direcao.upper()})")
+                        executou = self.executar_operacao(ativo, direcao)
+                        if executou:
+                            self.martingale_status[ativo]['pending'] = False
+                        continue
+
+                    if self.ultimo_ciclo_operado.get(ativo) == current_cycle:
+                        continue
+
                     if ativo in self.suspended_assets:
                         last_try = self.last_suspended_check.get(ativo, 0)
                         if now_ts - last_try > 60:
@@ -807,7 +818,8 @@ class IQFimatheBot:
                         self.log(f"{ativo}: Não foi possível calcular ADX (insuficiente candles). Pulando operação.")
                         continue
 
-                    if adx > adx_limiar:
+                    # SÓ bloqueia se o filtro estiver ativado!
+                    if self.usar_adx.get() and adx > adx_limiar:
                         self.log(f"{ativo}: Mercado com tendência (ADX>{adx_limiar}), aguardando lateralização para operar.")
                         continue
 
@@ -815,24 +827,62 @@ class IQFimatheBot:
                     if not sinal:
                         continue
 
-                    ciclo_operado = ultimo_sinal_operado.get((ativo, sinal))
-                    current_cycle = (now.hour, now.minute)
-                    if ciclo_operado == current_cycle:
-                        continue
-
                     if self.existe_operacao_pendente(ativo):
                         continue
 
-                    self.log(f"MHI+ADX: Sinal {sinal.upper()} em {ativo} (ADX={adx:.2f}), tentando executar operação")
+                    self.ultimo_ciclo_operado[ativo] = current_cycle
                     if self.executar_operacao(ativo, sinal):
                         self.martingale_status.pop(ativo, None)
-                        last_cycle[ativo] = current_cycle
-                        ultimo_sinal_operado[(ativo, sinal)] = current_cycle
                         time.sleep(1 if ciclo_rapido else 5)
-                    time.sleep(0.2 if ciclo_rapido else 0.5)
-
+                time.sleep(0.2 if ciclo_rapido else 0.5)
             time.sleep(0.2 if ciclo_rapido else 2)
             ciclo_rapido = False
+
+    def salvar_log_em_arquivo(self, caminho="log_operacoes.txt"):
+        try:
+            with open(caminho, 'w', encoding='utf-8') as f:
+                self.log_text.config(state=tk.NORMAL)
+                texto = self.log_text.get(1.0, tk.END)
+                self.log_text.config(state=tk.DISABLED)
+                f.write(texto)
+            self.log(f"Log salvo em {caminho}")
+        except Exception as e:
+            self.log(f"Erro ao salvar log: {e}")
+
+    def exportar_estatisticas(self, caminho="estatisticas.txt"):
+        try:
+            with open(caminho, 'w', encoding='utf-8') as f:
+                total = self.total_acertos + self.total_erros
+                taxa = (self.total_acertos / total) * 100 if total > 0 else 0
+                f.write(f"Total de operações: {total}\n")
+                f.write(f"Acertos: {self.total_acertos}\n")
+                f.write(f"Erros: {self.total_erros}\n")
+                f.write(f"Taxa de acerto: {taxa:.2f}%\n")
+            self.log(f"Estatísticas exportadas para {caminho}")
+        except Exception as e:
+            self.log(f"Erro ao exportar estatísticas: {e}")
+
+    def resetar_robo(self):
+        self.running = False
+        self.total_acertos = 0
+        self.total_erros = 0
+        self.operacoes_realizadas = {}
+        self.active_operations = {}
+        self.operacoes_per_ativo = {}
+        self.suspended_assets = set()
+        self.last_signal_bar = {}
+        self.last_candles = {}
+        self.custom_assets = {}
+        self.martingale_status = {}
+        self.market_status = {}
+        self.mhi_catalog_info = {}
+        self.processed_ops = set()
+        self.ultimo_ciclo_operado = {}
+        self.ops_label.config(text="0")
+        self.acertos_label.config(text="0")
+        self.erros_label.config(text="0")
+        self.taxa_label.config(text="0.00%")
+        self.log("Robô totalmente resetado.")
 
 if __name__ == "__main__":
     try:
