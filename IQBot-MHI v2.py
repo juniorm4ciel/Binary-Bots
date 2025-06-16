@@ -63,12 +63,6 @@ class RoboThread(threading.Thread):
         self.martingale_status = {}
 
     def catalogar_mhi_classico(self, candles, ativo):
-        """
-        Catalogação clássica MHI:
-        - Taxa de acerto MHI (entrada minoria)
-        - Taxa de repetição (próxima vela repete a maioria)
-        Considera os últimos 60 minutos (60 velas)
-        """
         if len(candles) < 61:
             self.signals.log_signal.emit(f"{ativo}: Não há candles suficientes para catalogação MHI.")
             return
@@ -86,10 +80,8 @@ class RoboThread(threading.Thread):
                 continue
             up = sum(1 for c in grupo if c['close'] > c['open'])
             down = sum(1 for c in grupo if c['close'] < c['open'])
-            # ignora grupo com doji
             if any(c['close'] == c['open'] for c in grupo):
                 continue
-            # maioria/minoria
             if up > down:
                 maj = 'alta'
                 mino = 'baixa'
@@ -97,23 +89,18 @@ class RoboThread(threading.Thread):
                 maj = 'baixa'
                 mino = 'alta'
             else:
-                continue  # empate, ignora
+                continue
 
-            # próxima vela é de alta ou baixa?
             if proxima['close'] == proxima['open']:
-                continue  # doji, ignora
-
+                continue
             if maj == 'alta' and proxima['close'] > proxima['open']:
                 repetiu_maj += 1
             if maj == 'baixa' and proxima['close'] < proxima['open']:
                 repetiu_maj += 1
-
-            # MHI: entrada na minoria
             if mino == 'alta' and proxima['close'] > proxima['open']:
                 acertou_mhi += 1
             if mino == 'baixa' and proxima['close'] < proxima['open']:
                 acertou_mhi += 1
-
             total += 1
 
         if total == 0:
@@ -164,7 +151,6 @@ class RoboThread(threading.Thread):
                 if self.stop_flag:
                     break
 
-                # 1. Executar Martingale se necessário, SEM checar ADX
                 mg = self.martingale_status.get(ativo)
                 if mg:
                     now = datetime.datetime.now()
@@ -180,7 +166,6 @@ class RoboThread(threading.Thread):
                             self.operacoes_realizadas[ativo] += 1
                             self.last_signal_time[ativo] = (now.hour, now.minute)
                             self.signals.log_signal.emit(f"Martingale iniciado: {mg['direcao'].upper()} em {ativo} valor ${mg['valor']:.2f} expiração {mg['exp']}min. ID: {operation_id}")
-                            # Espera resultado do MG
                             for _ in range(60):
                                 if self.stop_flag:
                                     break
@@ -209,12 +194,12 @@ class RoboThread(threading.Thread):
                         else:
                             self.signals.log_signal.emit(f"Falha ao executar Martingale em {ativo}: {operation_id}")
                             self.martingale_status.pop(ativo, None)
-                    continue  # Não faz entrada normal se MG pendente
+                    continue
 
                 now = datetime.datetime.now()
                 current_cycle = (now.hour, now.minute // 5)
                 if self.last_signal_time.get(ativo) == current_cycle:
-                    continue  # já operou neste quadrante MHI para este ativo
+                    continue
 
                 try:
                     candles = self.api.get_candles(ativo, 60, 61, int(time.time()))
@@ -227,23 +212,25 @@ class RoboThread(threading.Thread):
 
                 candles = sorted(candles, key=lambda x: x['from'], reverse=True)
                 self.catalogar_mhi_classico(candles, ativo)
-
-                # ADX e operação, segue o padrão anterior
                 candles = sorted(candles, key=lambda x: x['from'])
-                adx, _, _ = calculate_adx(candles[-(adx_period+1):], period=adx_period)
-                self.signals.log_signal.emit(f"{ativo}: ADX={adx:.2f} (limite: {adx_limiar})")
-                if adx is None:
-                    self.signals.log_signal.emit(f"{ativo}: Não foi possível calcular ADX (insuficiente candles). Pulando operação.")
-                    continue
-                if adx > adx_limiar:
-                    self.signals.log_signal.emit(f"{ativo}: Mercado com tendência (ADX>{adx_limiar}), aguardando lateralização para operar.")
-                    time.sleep(1)
-                    continue
+
+                # ADX toggle support
+                if parent.adx_checkbox.isChecked():
+                    adx, _, _ = calculate_adx(candles[-15:], period=14)
+                    self.signals.log_signal.emit(f"{ativo}: ADX={adx:.2f} (limite: {adx_limiar})")
+                    if adx is None:
+                        self.signals.log_signal.emit(f"{ativo}: Não foi possível calcular ADX (insuficiente candles). Pulando operação.")
+                        continue
+                    if adx > adx_limiar:
+                        self.signals.log_signal.emit(f"{ativo}: Mercado com tendência (ADX>{adx_limiar}), aguardando lateralização para operar.")
+                        time.sleep(1)
+                        continue
+
                 sinal = self.get_mhi_signal(candles)
                 if not sinal:
                     continue
 
-                self.signals.log_signal.emit(f"MHI+ADX: Sinal {sinal.upper()} em {ativo} (ADX={adx:.2f}), tentando executar operação")
+                self.signals.log_signal.emit(f"MHI{' + ADX' if parent.adx_checkbox.isChecked() else ''}: Sinal {sinal.upper()} em {ativo}" + (f" (ADX={adx:.2f})" if parent.adx_checkbox.isChecked() else "") + ", tentando executar operação")
                 valor = float(parent.valor_entry.text())
                 exp = int(parent.expiry_combobox.currentText())
                 saldo = self.api.get_balance()
@@ -255,7 +242,6 @@ class RoboThread(threading.Thread):
                     self.operacoes_realizadas[ativo] += 1
                     self.last_signal_time[ativo] = current_cycle
                     self.signals.log_signal.emit(f"Operação iniciada: {sinal.upper()} em {ativo} com valor ${valor:.2f} e expiração {exp} minutos. ID: {operation_id}")
-                    # Espera resultado
                     for _ in range(60):
                         if self.stop_flag:
                             break
@@ -277,7 +263,6 @@ class RoboThread(threading.Thread):
                     else:
                         losses += 1
                         self.signals.log_signal.emit(f"Operação {operation_id} em {ativo} finalizada: LOSS (valor: ${valor:.2f})")
-                        # Prepara Martingale
                         self.martingale_status[ativo] = {
                             'nivel': 1,
                             'direcao': sinal,
@@ -355,6 +340,12 @@ class ModernMHI(QMainWindow):
         self.theme_button.setCheckable(True)
         self.theme_button.clicked.connect(self.toggle_theme)
         conn_theme.addWidget(self.theme_button)
+
+        # Botão ADX
+        self.adx_checkbox = QCheckBox("Usar ADX")
+        self.adx_checkbox.setChecked(True)
+        conn_theme.addWidget(self.adx_checkbox)
+
         conn_theme.addStretch()
         config_frame = QFrame()
         config_frame.setFrameShape(QFrame.StyledPanel)
@@ -448,20 +439,47 @@ class ModernMHI(QMainWindow):
         if mode == "dark":
             palette.setColor(QPalette.Window, QColor(30, 30, 30))
             palette.setColor(QPalette.WindowText, Qt.white)
-            palette.setColor(QPalette.Base, QColor(25, 25, 25))
-            palette.setColor(QPalette.AlternateBase, QColor(45, 45, 45))
+            palette.setColor(QPalette.Base, QColor(0, 0, 0))  # Preto nos campos
+            palette.setColor(QPalette.AlternateBase, QColor(25, 25, 25))
             palette.setColor(QPalette.ToolTipBase, Qt.white)
             palette.setColor(QPalette.ToolTipText, Qt.white)
             palette.setColor(QPalette.Text, Qt.white)
-            palette.setColor(QPalette.Button, QColor(40, 40, 40))
+            palette.setColor(QPalette.Button, QColor(25, 25, 25))
             palette.setColor(QPalette.ButtonText, Qt.white)
             palette.setColor(QPalette.BrightText, Qt.red)
             palette.setColor(QPalette.Link, QColor(42, 130, 218))
             palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
             palette.setColor(QPalette.HighlightedText, Qt.black)
+            QApplication.instance().setPalette(palette)
+
+            # Estilização para widgets individuais (campos, botões, listas, combos, etc)
+            style = """
+            QWidget, QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QListWidget, QCheckBox, QPushButton {
+                background-color: #000000;
+                color: #FFFFFF;
+                border: 1px solid #333333;
+            }
+            QPlainTextEdit {
+                background-color: #000000;
+                color: #FFD700; /* amarelo para o log */
+                font-family: Consolas, monospace;
+            }
+            QLabel {
+                color: #FFFFFF;
+            }
+            QCheckBox, QPushButton {
+                color: #FFFFFF;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #222222;
+                color: #FFFFFF;
+            }
+            """
+            self.setStyleSheet(style)
         else:
+            self.setStyleSheet("")
             palette = QApplication.style().standardPalette()
-        QApplication.instance().setPalette(palette)
+            QApplication.instance().setPalette(palette)
 
     def conectar(self):
         email = self.email_entry.text().strip()

@@ -85,6 +85,7 @@ class IQFimatheBot:
         self.adx_period = 14
         self.adx_limiar = 20
         self.usar_adx = tk.BooleanVar(value=True)
+        self.usar_adx_bool = self.usar_adx.get()
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -173,7 +174,7 @@ class IQFimatheBot:
         self.saldo_label.grid(row=11, column=1, sticky="w", pady=2)
         self.update_saldo_button = ttk.Button(config_frame, text="Atualizar Saldo", command=self.atualizar_saldo)
         self.update_saldo_button.grid(row=11, column=2, sticky="w", padx=5)
-        self.adx_check = ttk.Checkbutton(config_frame, text="Usar filtro ADX (período 14, limiar 20)", variable=self.usar_adx)
+        self.adx_check = ttk.Checkbutton(config_frame, text="Usar filtro ADX (período 14, limiar 20)", variable=self.usar_adx, command=self.on_toggle_adx)
         self.adx_check.grid(row=12, column=0, columnspan=3, sticky="w", pady=2)
         control_frame = ttk.Frame(main_frame)
         control_frame.grid(row=2, column=0, pady=10)
@@ -203,6 +204,9 @@ class IQFimatheBot:
         self.log_text.pack(fill=tk.BOTH, expand=True)
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
+
+    def on_toggle_adx(self):
+        self.usar_adx_bool = self.usar_adx.get()
     def atualizar_saldo(self):
         try:
             if not self.api or not self.connected:
@@ -481,6 +485,7 @@ class IQFimatheBot:
                             del self.active_operations[op_id]
         except Exception as e:
             self.log(f"Erro ao verificar operações finalizadas: {str(e)}")
+
     def get_current_value(self, ativo):
         return self.operacoes_per_ativo.get(ativo, {'current_value': float(self.valor_entry.get())})['current_value']
 
@@ -535,7 +540,6 @@ class IQFimatheBot:
             self.connected = False
             self.connect_button.config(state=tk.NORMAL)
             self.disconnect_button.config(state=tk.DISABLED)
-
     def atualizar_ativos_disponiveis(self):
         try:
             if not self.api:
@@ -731,11 +735,11 @@ class IQFimatheBot:
 
     def loop_operacoes_primeiro_ciclo(self):
         self.loop_operacoes(ciclo_rapido=True)
+
     def get_cycle_key(self, dt=None):
         if dt is None:
             dt = datetime.datetime.now(datetime.timezone.utc)
         return f"{dt.year}-{dt.month}-{dt.day} {dt.hour}:{(dt.minute // 5) * 5:02d}"
-
     def loop_operacoes(self, ciclo_rapido=False):
         adx_period = self.adx_period
         adx_limiar = self.adx_limiar
@@ -818,19 +822,24 @@ class IQFimatheBot:
                         self.log(f"{ativo}: Não foi possível calcular ADX (insuficiente candles). Pulando operação.")
                         continue
 
-                    # SÓ bloqueia se o filtro estiver ativado!
-                    if self.usar_adx.get() and adx > adx_limiar:
+                    usar_adx_local = self.usar_adx_bool
+                    self.log(f"DEBUG: usar_adx={usar_adx_local}, ADX={adx}, limiar={adx_limiar}, now.second={now.second}, ativo={ativo}")
+
+                    if usar_adx_local and adx > adx_limiar:
                         self.log(f"{ativo}: Mercado com tendência (ADX>{adx_limiar}), aguardando lateralização para operar.")
                         continue
 
                     sinal = self.mhi_get_entry_signal(candles)
+                    self.log(f"DEBUG: sinal={sinal}")
                     if not sinal:
                         continue
 
                     if self.existe_operacao_pendente(ativo):
+                        self.log(f"DEBUG: existe operação pendente para {ativo}")
                         continue
 
                     self.ultimo_ciclo_operado[ativo] = current_cycle
+                    self.log(f"DEBUG: Executando operação em {ativo} no ciclo {current_cycle}")
                     if self.executar_operacao(ativo, sinal):
                         self.martingale_status.pop(ativo, None)
                         time.sleep(1 if ciclo_rapido else 5)
