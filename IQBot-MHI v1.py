@@ -351,7 +351,7 @@ class IQFimatheBot:
                 resultado_finalizado = False
                 for attempt in range(60):
                     try:
-                        result = self.api.check_win_v3(op_id)
+                        result = self.api.check_win_v4(op_id)
                         if result is not None and result != op_id:
                             with self.lock_ops:
                                 if op_id in self.processed_ops:
