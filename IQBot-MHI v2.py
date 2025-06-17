@@ -131,6 +131,12 @@ class RoboThread(threading.Thread):
         self.operacoes_realizadas = {a: 0 for a in ativos}
 
         while not self.stop_flag:
+            now = datetime.datetime.now()
+            # Só opera no início do quadrante MHI (exatamente no minuto % 5 == 0, e segundo == 0 ou 1)
+            if not (now.minute % 5 == 0 and now.second in (0, 1)):
+                time.sleep(1)
+                continue
+
             if parent.lucro_stop_loss_check.isChecked():
                 saldo_atual = self.api.get_balance() if self.api else 0
                 if saldo_atual >= saldo_inicial + lucro_alvo:
@@ -141,6 +147,7 @@ class RoboThread(threading.Thread):
                     self.signals.log_signal.emit(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
                     parent.stop_robo()
                     return
+
             all_ativos_limitados = all(self.operacoes_realizadas.get(ativo, 0) >= max_entradas for ativo in ativos)
             if not parent.lucro_stop_loss_check.isChecked() and all_ativos_limitados:
                 self.signals.log_signal.emit("Número máximo de entradas atingido em todos os ativos. Parando o robô.")
@@ -154,13 +161,24 @@ class RoboThread(threading.Thread):
                 mg = self.martingale_status.get(ativo)
                 if mg:
                     now = datetime.datetime.now()
-                    if now.second == 0:
+                    # Martingale só executa também no início do quadrante
+                    if now.second in (0, 1):
                         self.signals.log_signal.emit(f"Executando MARTINGALE {mg['nivel']} em {ativo}, direção {mg['direcao'].upper()}, valor ${mg['valor']:.2f}")
                         saldo = self.api.get_balance()
                         if saldo < mg['valor']:
                             self.signals.log_signal.emit(f"Erro: Saldo insuficiente para Martingale em {ativo}.")
                             self.martingale_status.pop(ativo, None)
                             continue
+                        if parent.lucro_stop_loss_check.isChecked():
+                            saldo_atual = self.api.get_balance() if self.api else 0
+                            if saldo_atual >= saldo_inicial + lucro_alvo:
+                                self.signals.log_signal.emit(f"Lucro alvo de ${lucro_alvo:.2f} atingido. Parando operações.")
+                                parent.stop_robo()
+                                return
+                            elif saldo_atual <= saldo_inicial - perda_alvo:
+                                self.signals.log_signal.emit(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
+                                parent.stop_robo()
+                                return
                         check, operation_id = self.api.buy(mg['valor'], ativo, mg['direcao'], mg['exp'])
                         if check:
                             self.operacoes_realizadas[ativo] += 1
@@ -229,6 +247,18 @@ class RoboThread(threading.Thread):
                 sinal = self.get_mhi_signal(candles)
                 if not sinal:
                     continue
+
+                # Confere stop/loss ANTES da operação
+                if parent.lucro_stop_loss_check.isChecked():
+                    saldo_atual = self.api.get_balance() if self.api else 0
+                    if saldo_atual >= saldo_inicial + lucro_alvo:
+                        self.signals.log_signal.emit(f"Lucro alvo de ${lucro_alvo:.2f} atingido. Parando operações.")
+                        parent.stop_robo()
+                        return
+                    elif saldo_atual <= saldo_inicial - perda_alvo:
+                        self.signals.log_signal.emit(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
+                        parent.stop_robo()
+                        return
 
                 self.signals.log_signal.emit(f"MHI{' + ADX' if parent.adx_checkbox.isChecked() else ''}: Sinal {sinal.upper()} em {ativo}" + (f" (ADX={adx:.2f})" if parent.adx_checkbox.isChecked() else "") + ", tentando executar operação")
                 valor = float(parent.valor_entry.text())

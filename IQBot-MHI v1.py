@@ -6,52 +6,9 @@ from iqoptionapi.stable_api import IQ_Option
 import logging
 import sys
 import threading
-import numpy as np
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-def calculate_adx(candles, period=14):
-    if len(candles) < period + 1:
-        return None, None, None
-
-    highs = np.array([c['max'] for c in candles])
-    lows = np.array([c['min'] for c in candles])
-    closes = np.array([c['close'] for c in candles])
-
-    plus_dm = highs[1:] - highs[:-1]
-    minus_dm = lows[:-1] - lows[1:]
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-
-    tr = np.maximum.reduce([
-        highs[1:] - lows[1:],
-        np.abs(highs[1:] - closes[:-1]),
-        np.abs(lows[1:] - closes[:-1])
-    ])
-
-    atr = np.zeros_like(tr)
-    atr[0] = np.mean(tr[:period])
-    for i in range(1, len(tr)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-
-    plus_dm_ema = np.zeros_like(plus_dm)
-    minus_dm_ema = np.zeros_like(minus_dm)
-    plus_dm_ema[0] = np.mean(plus_dm[:period])
-    minus_dm_ema[0] = np.mean(minus_dm[:period])
-    for i in range(1, len(plus_dm)):
-        plus_dm_ema[i] = (plus_dm_ema[i-1] * (period-1) + plus_dm[i]) / period
-        minus_dm_ema[i] = (minus_dm_ema[i-1] * (period-1) + minus_dm[i]) / period
-
-    plus_di = 100 * (plus_dm_ema / (atr + 1e-10))
-    minus_di = 100 * (minus_dm_ema / (atr + 1e-10))
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = np.zeros_like(dx)
-    adx[0] = np.mean(dx[:period])
-    for i in range(1, len(dx)):
-        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-
-    return adx[-1], plus_di[-1], minus_di[-1]
 
 class IQFimatheBot:
     def __init__(self, root):
@@ -82,10 +39,9 @@ class IQFimatheBot:
         self.ativo_locks = {}
         self.last_suspended_check = {}
         self.ultimo_ciclo_operado = {}
-        self.adx_period = 14
-        self.adx_limiar = 20
-        self.usar_adx = tk.BooleanVar(value=True)
-        self.usar_adx_bool = self.usar_adx.get()
+        self._threads_started = False
+        self._after_scheduled = False
+        self.suspended_failures = {}
         self.setup_ui()
         self.setup_styles()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -174,8 +130,6 @@ class IQFimatheBot:
         self.saldo_label.grid(row=11, column=1, sticky="w", pady=2)
         self.update_saldo_button = ttk.Button(config_frame, text="Atualizar Saldo", command=self.atualizar_saldo)
         self.update_saldo_button.grid(row=11, column=2, sticky="w", padx=5)
-        self.adx_check = ttk.Checkbutton(config_frame, text="Usar filtro ADX (período 14, limiar 20)", variable=self.usar_adx, command=self.on_toggle_adx)
-        self.adx_check.grid(row=12, column=0, columnspan=3, sticky="w", pady=2)
         control_frame = ttk.Frame(main_frame)
         control_frame.grid(row=2, column=0, pady=10)
         self.start_button = ttk.Button(control_frame, text="Iniciar Robô", command=self.iniciar_robo, state=tk.DISABLED)
@@ -205,8 +159,6 @@ class IQFimatheBot:
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
 
-    def on_toggle_adx(self):
-        self.usar_adx_bool = self.usar_adx.get()
     def atualizar_saldo(self):
         try:
             if not self.api or not self.connected:
@@ -261,7 +213,6 @@ class IQFimatheBot:
         self.disconnect_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.DISABLED)
         self.log("Desconectado da corretora.")
-
     def get_candles_last_hour(self, ativo):
         try:
             current_time = self.api.get_server_timestamp() if self.api else int(time.time())
@@ -374,39 +325,6 @@ class IQFimatheBot:
         count_baixa = directions.count('baixa')
         minoria = 'alta' if count_alta < count_baixa else 'baixa'
         return 'call' if minoria == 'alta' else 'put'
-
-    def executar_operacao(self, ativo, sinal):
-        try:
-            if not self.api or not self.connected:
-                self.log("API não inicializada.")
-                return False
-            if ativo in self.suspended_assets:
-                self.log(f"{ativo}: Ativo suspenso para operações.")
-                return False
-            valor = self.get_current_value(ativo)
-            exp = int(self.expiry_combobox.get())
-            saldo = self.api.get_balance()
-            if saldo < valor:
-                self.log(f"Erro: Saldo insuficiente para operação em {ativo}.")
-                return False
-            check, operation_id = self.api.buy(valor, ativo, sinal, exp)
-            if check:
-                with self.lock_ops:
-                    self.active_operations[operation_id] = {'ativo': ativo, 'sinal': sinal, 'valor': valor}
-                self.operacoes_realizadas[ativo] = self.operacoes_realizadas.get(ativo, 0) + 1
-                self.atualizar_estatisticas()
-                self.log(f"Operação iniciada: {sinal.upper()} em {ativo} com valor ${valor:.2f} e expiração {exp} minutos. ID: {operation_id}")
-                return True
-            else:
-                self.log(f"Falha ao executar operação em {ativo}: {operation_id}")
-                if operation_id and "active is suspended" in str(operation_id).lower():
-                    self.suspended_assets.add(ativo)
-                    self.last_suspended_check[ativo] = time.time()
-                return False
-        except Exception as e:
-            self.log(f"Erro ao executar operação em {ativo}: {str(e)}")
-            return False
-
     def existe_operacao_pendente(self, ativo):
         with self.lock_ops:
             for op in self.active_operations.values():
@@ -489,110 +407,53 @@ class IQFimatheBot:
     def get_current_value(self, ativo):
         return self.operacoes_per_ativo.get(ativo, {'current_value': float(self.valor_entry.get())})['current_value']
 
-    def parar_robo(self):
-        motivo = "Manual" if self.running else "Automático"
-        self.running = False
+    def executar_operacao(self, ativo, sinal):
         try:
-            self.check_finished_operations()
-        except Exception as e:
-            self.log(f"Erro ao verificar operações pendentes: {str(e)}")
-        with self.lock_ops:
-            if self.active_operations:
-                self.log(f"Operações pendentes não finalizadas: {list(self.active_operations.keys())}")
-        self.start_button.config(state=tk.NORMAL)
-        self.stop_button.config(state=tk.DISABLED)
-        self.status_label.config(text="Parado", foreground="red")
-        self.log(f"=== OPERAÇÃO ENCERRADA === Motivo: {motivo}")
+            if not self.api or not self.connected:
+                self.log("API não inicializada.")
+                return False
+            if ativo in self.suspended_assets:
+                self.log(f"{ativo}: Ativo suspenso para operações.")
+                return False
+            valor = self.get_current_value(ativo)
+            exp = int(self.expiry_combobox.get())
+            saldo = self.api.get_balance()
+            if saldo < valor:
+                self.log(f"Erro: Saldo insuficiente para operação em {ativo}.")
+                return False
 
-    def conectar(self):
-        email = self.email_entry.get().strip()
-        senha = self.senha_entry.get().strip()
-        if not email or not senha:
-            messagebox.showerror("Erro", "Email e senha são obrigatórios")
-            return
-        self.log(f"Conectando como {email}...")
-        try:
-            self.api = IQ_Option(email, senha)
-            check, reason = self.api.connect()
+            digital_mode_tried = False
+
+            check, operation_id = self.api.buy(valor, ativo, sinal, exp)
+            if not check and "suspended" in str(operation_id).lower():
+                self.log(f"Tentando modo digital spot para {ativo}")
+                try:
+                    check, operation_id = self.api.buy_digital_spot(ativo, valor, sinal, exp)
+                    digital_mode_tried = True
+                except Exception as e:
+                    self.log(f"Erro ao tentar digital spot: {e}")
+                    check = False
+
             if check:
-                self.conta_tipo = self.conta_combobox.get()
-                self.api.change_balance(self.conta_tipo)
-                self.connected = True
-                self.status_label.config(text="Conectado", foreground="green")
-                self.connect_button.config(state=tk.DISABLED)
-                self.disconnect_button.config(state=tk.NORMAL)
-                self.start_button.config(state=tk.NORMAL)
-                self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
-                self.custom_assets = self.api.get_all_ACTIVES_OPCODE()
-                self.custom_assets["EURAUD-OTC"] = 77
-                self.custom_assets["EURCAD-OTC"] = 78
-                time.sleep(1)
-                self.atualizar_ativos_disponiveis()
+                with self.lock_ops:
+                    self.active_operations[operation_id] = {'ativo': ativo, 'sinal': sinal, 'valor': valor}
+                self.operacoes_realizadas[ativo] = self.operacoes_realizadas.get(ativo, 0) + 1
+                self.atualizar_estatisticas()
+                self.log(f"Operação iniciada: {sinal.upper()} em {ativo} com valor ${valor:.2f} e expiração {exp} minutos. ID: {operation_id} (modo: {'digital' if digital_mode_tried else 'binary'})")
+                self.suspended_failures[ativo] = 0
+                return True
             else:
-                self.log(f"Falha na conexão: {reason}")
-                messagebox.showerror("Erro", f"Falha na conexão: {reason}")
-                self.connected = False
-                self.connect_button.config(state=tk.NORMAL)
-                self.disconnect_button.config(state=tk.DISABLED)
+                falha_antiga = self.suspended_failures.get(ativo, 0)
+                self.suspended_failures[ativo] = falha_antiga + 1
+                self.log(f"Falha ao executar operação em {ativo}: {operation_id} (Modo: {'digital' if digital_mode_tried else 'binary'}), Falhas seguidas: {self.suspended_failures[ativo]}")
+                if self.suspended_failures[ativo] >= 3:
+                    self.suspended_assets.add(ativo)
+                    self.last_suspended_check[ativo] = time.time()
+                    self.log(f"{ativo}: Suspenso para operações após 3 falhas seguidas.")
+                return False
         except Exception as e:
-            self.log(f"Erro na conexão: {str(e)}")
-            messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
-            self.connected = False
-            self.connect_button.config(state=tk.NORMAL)
-            self.disconnect_button.config(state=tk.DISABLED)
-    def atualizar_ativos_disponiveis(self):
-        try:
-            if not self.api:
-                self.log("Erro: API não inicializada.")
-                return
-            if not self.connected:
-                self.log("Erro: API não conectada.")
-                return
-            if not self.api.check_connect():
-                self.log("Erro: Conexão com a API perdida.")
-                return
-            try:
-                activos = self.api.get_all_ACTIVES_OPCODE()
-                if activos:
-                    novos_ativos = [ativo for ativo in activos.keys() if self.operar_otc.get() or not ativo.endswith('-OTC')]
-                else:
-                    novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
-            except Exception as fallback_error:
-                novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
-            self.ativos_disponiveis = sorted(novos_ativos)
-            self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
-            if not self.ativos_selecionados and "EURUSD-OTC" in self.ativos_disponiveis:
-                self.ativos_selecionados = ["EURUSD-OTC"]
-                self.log("Selecionado EURUSD-OTC como padrão")
-            self.carregar_ativos()
-            self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
-            self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
-        except Exception as e:
-            self.log(f"Erro ao atualizar ativos: {str(e)}")
-            if self.reconnect_api():
-                time.sleep(5)
-                self.atualizar_ativos_disponiveis()
-
-    def carregar_ativos(self):
-        self.ativos_listbox.delete(0, tk.END)
-        for ativo in sorted(self.ativos_disponiveis):
-            self.ativos_listbox.insert(tk.END, ativo)
-
-    def obter_ativos_selecionados(self):
-        selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
-        return selecionados
-
-    def log(self, message):
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        log_message = f"[{timestamp}] {message}\n"
-        try:
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, log_message)
-            self.log_text.see(tk.END)
-            self.log_text.config(state=tk.DISABLED)
-            logger.info(message)
-        except Exception as e:
-            print(f"Erro no log: {e}\n{log_message}")
+            self.log(f"Erro ao executar operação em {ativo}: {str(e)}")
+            return False
 
     def atualizar_estatisticas(self):
         total_ops = sum(self.operacoes_realizadas.values())
@@ -653,199 +514,113 @@ class IQFimatheBot:
             info['soros_base_value'] = initial_value
             info['martingale_level'] = 0
             self.martingale_status.pop(ativo, None)
+    def parar_robo(self):
+        motivo = "Manual" if self.running else "Automático"
+        self.running = False
+        try:
+            self.check_finished_operations()
+        except Exception as e:
+            self.log(f"Erro ao verificar operações pendentes: {str(e)}")
+        with self.lock_ops:
+            if self.active_operations:
+                self.log(f"Operações pendentes não finalizadas: {list(self.active_operations.keys())}")
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        self.status_label.config(text="Parado", foreground="red")
+        self.log(f"=== OPERAÇÃO ENCERRADA === Motivo: {motivo}")
+        self._threads_started = False
+        self._after_scheduled = False
 
-    def on_closing(self):
-        if messagebox.askokcancel("Sair", "Deseja realmente sair?"):
-            self.running = False
-            self.parar_robo()
-            self.desconectar()
-            self.root.destroy()
-            sys.exit()
-
-    def iniciar_robo(self):
-        if not self.connected:
-            messagebox.showerror("Erro", "Conecte-se primeiro")
+    def conectar(self):
+        email = self.email_entry.get().strip()
+        senha = self.senha_entry.get().strip()
+        if not email or not senha:
+            messagebox.showerror("Erro", "Email e senha são obrigatórios")
             return
-        self.ativos_selecionados = self.obter_ativos_selecionados()
-        if not self.ativos_selecionados:
-            messagebox.showerror("Erro", "Selecione pelo menos um ativo")
-            return
-        self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
-        if not self.ativos_selecionados:
-            self.ativos_selecionados = ["EURUSD-OTC"]
-            self.log("Nenhum ativo válido selecionado. Usando EURUSD-OTC como padrão.")
-        initial_value = float(self.valor_entry.get())
-        self.operacoes_per_ativo = {
-            ativo: {
-                'current_value': initial_value,
-                'martingale_level': 0,
-                'soros_base_value': initial_value
-            }
-            for ativo in self.ativos_selecionados
-        }
-        self.operacoes_realizadas = {ativo: 0 for ativo in self.ativos_selecionados}
-        self.suspended_assets.clear()
-        self.last_signal_bar.clear()
-        self.last_candles.clear()
-        self.total_acertos = 0
-        self.total_erros = 0
-        self.running = True
-        self.ativo_locks = {ativo: threading.Lock() for ativo in self.ativos_selecionados}
-        self.last_suspended_check = {}
-        self.ultimo_ciclo_operado = {}
-        self.start_button.config(state=tk.DISABLED)
-        self.stop_button.config(state=tk.NORMAL)
-        self.status_label.config(text="Operando", foreground="green")
-        self.log("\n=== INÍCIO DA OPERAÇÃO (MHI) ===")
-        self.log(f"Conta: {'DEMO' if self.conta_tipo == 'PRACTICE' else 'REAL'}")
-        self.log(f"Ativos: {', '.join(self.ativos_selecionados)}")
-        self.log(f"Valor: ${float(self.valor_entry.get()):.2f}")
-        self.log(f"Expiração: {self.expiry_combobox.get()} min")
-        self.log(f"Entradas: {self.entradas_spinbox.get()}")
-        self.log(f"Soros: {self.soros_spinbox.get()}%")
-        self.log(f"OTC: {'SIM' if self.operar_otc.get() else 'NÃO'}")
-        self.log("========================")
-        for ativo in self.ativos_selecionados:
-            self.log(f"Iniciando catalogação MHI para {ativo}...")
-            self.mhi_catalog_and_log(ativo)
-        self.log("Aguardando fechamento do próximo quadrante de 5 velas para iniciar operações...")
-        max_wait = 360
-        delays = []
-        for ativo in self.ativos_selecionados:
-            candles = self.get_candles_last_hour(ativo)
-            if not candles:
-                delays.append(60)
-                continue
-            last_candle_time = candles[-1]['from']
-            last_minute = datetime.datetime.fromtimestamp(last_candle_time).minute
-            wait_min = (5 - (last_minute % 5)) % 5
-            if wait_min == 0:
-                wait_min = 5
-            now = datetime.datetime.now(datetime.timezone.utc)
-            seconds_past = now.second
-            delay = wait_min * 60 - seconds_past
-            delays.append(max(10, min(delay, max_wait)))
-        wait_time = max(delays) if delays else 60
-        self.log(f"Aguardando {int(wait_time/60)}min {wait_time%60:.0f}s para começar a operar no próximo quadrante.")
-        self.root.after(int(wait_time * 1000), self._iniciar_threads_operacao)
+        self.log(f"Conectando como {email}...")
+        try:
+            self.api = IQ_Option(email, senha)
+            check, reason = self.api.connect()
+            if check:
+                self.conta_tipo = self.conta_combobox.get()
+                self.api.change_balance(self.conta_tipo)
+                self.connected = True
+                self.status_label.config(text="Conectado", foreground="green")
+                self.connect_button.config(state=tk.DISABLED)
+                self.disconnect_button.config(state=tk.NORMAL)
+                self.start_button.config(state=tk.NORMAL)
+                self.log(f"Conectado com sucesso! Conta: {self.conta_tipo}")
+                self.custom_assets = self.api.get_all_ACTIVES_OPCODE()
+                self.custom_assets["EURAUD-OTC"] = 77
+                self.custom_assets["EURCAD-OTC"] = 78
+                time.sleep(1)
+                self.atualizar_ativos_disponiveis()
+            else:
+                self.log(f"Falha na conexão: {reason}")
+                messagebox.showerror("Erro", f"Falha na conexão: {reason}")
+                self.connected = False
+                self.connect_button.config(state=tk.NORMAL)
+                self.disconnect_button.config(state=tk.DISABLED)
+        except Exception as e:
+            self.log(f"Erro na conexão: {str(e)}")
+            messagebox.showerror("Erro", f"Falha na conexão: {str(e)}")
+            self.connected = False
+            self.connect_button.config(state=tk.NORMAL)
+            self.disconnect_button.config(state=tk.DISABLED)
 
-    def _iniciar_threads_operacao(self):
-        threading.Thread(target=self.loop_operacoes_primeiro_ciclo, daemon=True).start()
-        threading.Thread(target=self.check_finished_operations_loop, daemon=True).start()
-
-    def loop_operacoes_primeiro_ciclo(self):
-        self.loop_operacoes(ciclo_rapido=True)
-
-    def get_cycle_key(self, dt=None):
-        if dt is None:
-            dt = datetime.datetime.now(datetime.timezone.utc)
-        return f"{dt.year}-{dt.month}-{dt.day} {dt.hour}:{(dt.minute // 5) * 5:02d}"
-    def loop_operacoes(self, ciclo_rapido=False):
-        adx_period = self.adx_period
-        adx_limiar = self.adx_limiar
-
-        max_entradas = int(self.entradas_spinbox.get())
-        lucro_alvo = float(self.lucro_entry.get()) if self.lucro_entry.get() else float('inf')
-        perda_alvo = float(self.perda_entry.get()) if self.perda_entry.get() else float('inf')
-        saldo_inicial = self.api.get_balance() if self.api else 0
-
-        while self.running:
-            if self.lucro_stop_loss_var.get():
-                saldo_atual = self.api.get_balance() if self.api else 0
-                if saldo_atual >= saldo_inicial + lucro_alvo:
-                    self.log(f"Lucro alvo de ${lucro_alvo:.2f} atingido. Parando operações.")
-                    self.parar_robo()
-                    return
-                elif saldo_atual <= saldo_inicial - perda_alvo:
-                    self.log(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
-                    self.parar_robo()
-                    return
-            all_ativos_limitados = all(self.operacoes_realizadas.get(ativo, 0) >= max_entradas for ativo in self.ativos_selecionados)
-            if not self.lucro_stop_loss_var.get() and all_ativos_limitados:
-                self.log("Número máximo de entradas atingido em todos os ativos. Parando o robô.")
-                self.parar_robo()
+    def atualizar_ativos_disponiveis(self):
+        try:
+            if not self.api:
+                self.log("Erro: API não inicializada.")
                 return
+            if not self.connected:
+                self.log("Erro: API não conectada.")
+                return
+            if not self.api.check_connect():
+                self.log("Erro: Conexão com a API perdida.")
+                return
+            try:
+                activos = self.api.get_all_ACTIVES_OPCODE()
+                if activos:
+                    novos_ativos = [ativo for ativo in activos.keys() if self.operar_otc.get() or not ativo.endswith('-OTC')]
+                else:
+                    novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
+            except Exception as fallback_error:
+                novos_ativos = ["EURUSD-OTC"] if self.operar_otc.get() else []
+            self.ativos_disponiveis = sorted(novos_ativos)
+            self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
+            if not self.ativos_selecionados and "EURUSD-OTC" in self.ativos_disponiveis:
+                self.ativos_selecionados = ["EURUSD-OTC"]
+                self.log("Selecionado EURUSD-OTC como padrão")
+            self.carregar_ativos()
+            self.log(f"Ativos atualizados: {len(self.ativos_disponiveis)} disponíveis")
+            self.log(f"Ativos disponíveis: {self.ativos_disponiveis}")
+        except Exception as e:
+            self.log(f"Erro ao atualizar ativos: {str(e)}")
+            if self.reconnect_api():
+                time.sleep(5)
+                self.atualizar_ativos_disponiveis()
 
-            for ativo in self.ativos_selecionados:
-                with self.ativo_locks[ativo]:
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    now_ts = time.time()
-                    current_cycle = self.get_cycle_key(now)
+    def carregar_ativos(self):
+        self.ativos_listbox.delete(0, tk.END)
+        for ativo in sorted(self.ativos_disponiveis):
+            self.ativos_listbox.insert(tk.END, ativo)
 
-                    if self.martingale_status.get(ativo, {}).get('pending', False):
-                        direcao = self.martingale_status[ativo]['direcao']
-                        self.log(f"Executando Martingale em {ativo} ignorando trava de ciclo (direção: {direcao.upper()})")
-                        executou = self.executar_operacao(ativo, direcao)
-                        if executou:
-                            self.martingale_status[ativo]['pending'] = False
-                        continue
+    def obter_ativos_selecionados(self):
+        selecionados = [self.ativos_listbox.get(i) for i in self.ativos_listbox.curselection()]
+        return selecionados
 
-                    if self.ultimo_ciclo_operado.get(ativo) == current_cycle:
-                        continue
-
-                    if ativo in self.suspended_assets:
-                        last_try = self.last_suspended_check.get(ativo, 0)
-                        if now_ts - last_try > 60:
-                            open_times = self.api.get_all_open_time()
-                            ativo_type = 'turbo' if "-OTC" in ativo else 'binary'
-                            ativo_base = ativo.replace("-OTC", "")
-                            is_open = False
-                            if ativo in open_times.get(ativo_type, {}):
-                                is_open = open_times[ativo_type][ativo]["open"]
-                            elif ativo_base in open_times.get(ativo_type, {}):
-                                is_open = open_times[ativo_type][ativo_base]["open"]
-                            if is_open:
-                                self.suspended_assets.remove(ativo)
-                                self.log(f"{ativo}: Ativo reaberto, liberando operações.")
-                            else:
-                                self.log(f"{ativo}: Ainda suspenso para operações, aguardando liberação...")
-                            self.last_suspended_check[ativo] = now_ts
-                        continue
-
-                    if not self.lucro_stop_loss_var.get() and self.operacoes_realizadas.get(ativo, 0) >= max_entradas:
-                        continue
-
-                    if now.second != 0:
-                        continue
-
-                    num_candles = max(20, adx_period + 6)
-                    candles = self.api.get_candles(ativo, 60, num_candles, int(time.time()))
-                    if not candles or len(candles) < adx_period + 5:
-                        self.log(f"{ativo}: Não foi possível obter candles suficientes para operação MHI+ADX.")
-                        continue
-
-                    candles = sorted(candles, key=lambda x: x['from'])
-                    adx, plus_di, minus_di = calculate_adx(candles[-(adx_period+1):], period=adx_period)
-                    if adx is not None:
-                        self.log(f"{ativo}: ADX={adx:.2f} (limite: {adx_limiar})")
-                    else:
-                        self.log(f"{ativo}: Não foi possível calcular ADX (insuficiente candles). Pulando operação.")
-                        continue
-
-                    usar_adx_local = self.usar_adx_bool
-                    self.log(f"DEBUG: usar_adx={usar_adx_local}, ADX={adx}, limiar={adx_limiar}, now.second={now.second}, ativo={ativo}")
-
-                    if usar_adx_local and adx > adx_limiar:
-                        self.log(f"{ativo}: Mercado com tendência (ADX>{adx_limiar}), aguardando lateralização para operar.")
-                        continue
-
-                    sinal = self.mhi_get_entry_signal(candles)
-                    self.log(f"DEBUG: sinal={sinal}")
-                    if not sinal:
-                        continue
-
-                    if self.existe_operacao_pendente(ativo):
-                        self.log(f"DEBUG: existe operação pendente para {ativo}")
-                        continue
-
-                    self.ultimo_ciclo_operado[ativo] = current_cycle
-                    self.log(f"DEBUG: Executando operação em {ativo} no ciclo {current_cycle}")
-                    if self.executar_operacao(ativo, sinal):
-                        self.martingale_status.pop(ativo, None)
-                        time.sleep(1 if ciclo_rapido else 5)
-                time.sleep(0.2 if ciclo_rapido else 0.5)
-            time.sleep(0.2 if ciclo_rapido else 2)
-            ciclo_rapido = False
+    def log(self, message):
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        log_message = f"[{timestamp}] {message}\n"
+        try:
+            self.log_text.config(state=tk.NORMAL)
+            self.log_text.insert(tk.END, log_message)
+            self.log_text.see(tk.END)
+            self.log_text.config(state=tk.DISABLED)
+            logger.info(message)
+        except Exception as e:
+            print(f"Erro no log: {e}\n{log_message}")
 
     def salvar_log_em_arquivo(self, caminho="log_operacoes.txt"):
         try:
@@ -887,11 +662,217 @@ class IQFimatheBot:
         self.mhi_catalog_info = {}
         self.processed_ops = set()
         self.ultimo_ciclo_operado = {}
+        self._threads_started = False
+        self._after_scheduled = False
+        self.suspended_failures = {}
         self.ops_label.config(text="0")
         self.acertos_label.config(text="0")
         self.erros_label.config(text="0")
         self.taxa_label.config(text="0.00%")
         self.log("Robô totalmente resetado.")
+
+    def on_closing(self):
+        if messagebox.askokcancel("Sair", "Deseja realmente sair?"):
+            self.running = False
+            self.parar_robo()
+            self.desconectar()
+            self.root.destroy()
+            sys.exit()
+
+    def iniciar_robo(self):
+        if not self.connected:
+            messagebox.showerror("Erro", "Conecte-se primeiro")
+            return
+        self.ativos_selecionados = self.obter_ativos_selecionados()
+        if not self.ativos_selecionados:
+            messagebox.showerror("Erro", "Selecione pelo menos um ativo")
+            return
+        self.ativos_selecionados = [a for a in self.ativos_selecionados if a in self.ativos_disponiveis]
+        if not self.ativos_selecionados:
+            self.ativos_selecionados = ["EURUSD-OTC"]
+            self.log("Nenhum ativo válido selecionado. Usando EURUSD-OTC como padrão.")
+        initial_value = float(self.valor_entry.get())
+        self.operacoes_per_ativo = {
+            ativo: {
+                'current_value': initial_value,
+                'martingale_level': 0,
+                'soros_base_value': initial_value
+            }
+            for ativo in self.ativos_selecionados
+        }
+        self.operacoes_realizadas = {ativo: 0 for ativo in self.ativos_selecionados}
+        self.suspended_assets.clear()
+        self.last_signal_bar.clear()
+        self.last_candles.clear()
+        self.total_acertos = 0
+        self.total_erros = 0
+        self.running = True
+        self.ativo_locks = {ativo: threading.Lock() for ativo in self.ativos_selecionados}
+        self.last_suspended_check = {}
+        self.ultimo_ciclo_operado = {}
+        self._threads_started = False
+        self._after_scheduled = False
+        self.suspended_failures = {}
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.status_label.config(text="Operando", foreground="green")
+        self.log("\n=== INÍCIO DA OPERAÇÃO (MHI) ===")
+        self.log(f"Conta: {'DEMO' if self.conta_tipo == 'PRACTICE' else 'REAL'}")
+        self.log(f"Ativos: {', '.join(self.ativos_selecionados)}")
+        self.log(f"Valor: ${float(self.valor_entry.get()):.2f}")
+        self.log(f"Expiração: {self.expiry_combobox.get()} min")
+        self.log(f"Entradas: {self.entradas_spinbox.get()}")
+        self.log(f"Soros: {self.soros_spinbox.get()}%")
+        self.log(f"OTC: {'SIM' if self.operar_otc.get() else 'NÃO'}")
+        self.log("========================")
+        for ativo in self.ativos_selecionados:
+            self.log(f"Iniciando catalogação MHI para {ativo}...")
+            self.mhi_catalog_and_log(ativo)
+        self.log("Aguardando fechamento do próximo quadrante de 5 velas para iniciar operações...")
+        max_wait = 360
+        delays = []
+        for ativo in self.ativos_selecionados:
+            candles = self.get_candles_last_hour(ativo)
+            if not candles:
+                delays.append(60)
+                continue
+            last_candle_time = candles[-1]['from']
+            last_minute = datetime.datetime.fromtimestamp(last_candle_time).minute
+            wait_min = (5 - (last_minute % 5)) % 5
+            if wait_min == 0:
+                wait_min = 5
+            now = datetime.datetime.now(datetime.timezone.utc)
+            seconds_past = now.second
+            delay = wait_min * 60 - seconds_past
+            delays.append(max(10, min(delay, max_wait)))
+        wait_time = max(delays) if delays else 60
+        if self._after_scheduled:
+            self.log("O início das operações já foi agendado, aguardando...")
+            return
+        self._after_scheduled = True
+        self.log(f"Agendando início das operações para daqui {wait_time} segundos.")
+        self.root.after(int(wait_time * 1000), self._iniciar_threads_operacao)
+
+    def _iniciar_threads_operacao(self):
+        if self._threads_started:
+            self.log("Threads já iniciadas, não vou iniciar novamente.")
+            return
+        self._threads_started = True
+        self.log(">> Iniciando threads de operação e checagem de finalizadas <<")
+        threading.Thread(target=self.loop_operacoes_primeiro_ciclo, daemon=True).start()
+        threading.Thread(target=self.check_finished_operations_loop, daemon=True).start()
+
+    def loop_operacoes_primeiro_ciclo(self):
+        self.loop_operacoes(ciclo_rapido=True)
+
+    def get_cycle_key(self, dt=None):
+        if dt is None:
+            dt = datetime.datetime.now(datetime.timezone.utc)
+        return f"{dt.year}-{dt.month}-{dt.day} {dt.hour}:{(dt.minute // 5) * 5:02d}"
+
+    def loop_operacoes(self, ciclo_rapido=False):
+        try:
+            self.log(">> Entrou no loop de operações! <<")
+            max_entradas = int(self.entradas_spinbox.get())
+            lucro_alvo = float(self.lucro_entry.get()) if self.lucro_entry.get() else float('inf')
+            perda_alvo = float(self.perda_entry.get()) if self.perda_entry.get() else float('inf')
+            saldo_inicial = self.api.get_balance() if self.api else 0
+
+            while self.running:
+                if self.lucro_stop_loss_var.get():
+                    saldo_atual = self.api.get_balance() if self.api else 0
+                    if saldo_atual >= saldo_inicial + lucro_alvo:
+                        self.log(f"Lucro alvo de ${lucro_alvo:.2f} atingido. Parando operações.")
+                        self.parar_robo()
+                        return
+                    elif saldo_atual <= saldo_inicial - perda_alvo:
+                        self.log(f"Perda alvo de ${perda_alvo:.2f} atingido. Parando operações.")
+                        self.parar_robo()
+                        return
+                all_ativos_limitados = all(self.operacoes_realizadas.get(ativo, 0) >= max_entradas for ativo in self.ativos_selecionados)
+                if not self.lucro_stop_loss_var.get() and all_ativos_limitados:
+                    self.log("Número máximo de entradas atingido em todos os ativos. Parando o robô.")
+                    self.parar_robo()
+                    return
+
+                for ativo in self.ativos_selecionados:
+                    with self.ativo_locks[ativo]:
+                        now_dt = datetime.datetime.now(datetime.timezone.utc)
+                        now_ts = time.time()
+                        current_cycle = self.get_cycle_key(now_dt)
+
+                        if self.martingale_status.get(ativo, {}).get('pending', False):
+                            direcao = self.martingale_status[ativo]['direcao']
+                            self.log(f"Executando Martingale em {ativo} ignorando trava de ciclo (direção: {direcao.upper()})")
+                            executou = self.executar_operacao(ativo, direcao)
+                            if executou:
+                                self.martingale_status[ativo]['pending'] = False
+                            continue
+
+                        if self.ultimo_ciclo_operado.get(ativo) == current_cycle:
+                            continue
+
+                        if ativo in self.suspended_assets:
+                            last_try = self.last_suspended_check.get(ativo, 0)
+                            if now_ts - last_try > 60:
+                                try:
+                                    open_times = self.api.get_all_open_time()
+                                except Exception as e:
+                                    self.log(f"{ativo}: Falha ao consultar horários de abertura (provável bug na API IQ Option): {e}. Pulando verificação de suspenso.")
+                                    self.last_suspended_check[ativo] = now_ts
+                                    continue
+                                ativo_type = 'turbo' if "-OTC" in ativo else 'binary'
+                                ativo_base = ativo.replace("-OTC", "")
+                                is_open = False
+                                if ativo in open_times.get(ativo_type, {}):
+                                    is_open = open_times[ativo_type][ativo]["open"]
+                                elif ativo_base in open_times.get(ativo_type, {}):
+                                    is_open = open_times[ativo_type][ativo_base]["open"]
+                                if is_open:
+                                    self.suspended_assets.remove(ativo)
+                                    self.log(f"{ativo}: Ativo reaberto, liberando operações.")
+                                else:
+                                    self.log(f"{ativo}: Ainda suspenso para operações, aguardando liberação...")
+                                self.last_suspended_check[ativo] = now_ts
+                            continue
+
+                        if not self.lucro_stop_loss_var.get() and self.operacoes_realizadas.get(ativo, 0) >= max_entradas:
+                            continue
+
+                        if now_dt.second != 0:
+                            continue
+
+                        num_candles = 20
+                        epoch = int(time.time())
+                        candles = self.api.get_candles(ativo, 60, num_candles, epoch - 60)
+                        if not candles or len(candles) < 5:
+                            self.log(f"{ativo}: Não foi possível obter candles suficientes para operação MHI.")
+                            continue
+
+                        candles = sorted(candles, key=lambda x: x['from'])
+                        ultimos = candles[-5:]
+                        self.log(f"Analisando para operação: {[self.direction(c) for c in ultimos]} | closes: {[c['close'] for c in ultimos]} | opens: {[c['open'] for c in ultimos]}")
+                        sinal = self.mhi_get_entry_signal(candles)
+                        self.log(f"DEBUG: sinal={sinal}")
+                        if not sinal:
+                            continue
+
+                        if self.existe_operacao_pendente(ativo):
+                            self.log(f"DEBUG: existe operação pendente para {ativo}")
+                            continue
+
+                        self.ultimo_ciclo_operado[ativo] = current_cycle
+                        self.log(f"DEBUG: Executando operação em {ativo} no ciclo {current_cycle}")
+                        if self.executar_operacao(ativo, sinal):
+                            self.martingale_status.pop(ativo, None)
+                            time.sleep(1 if ciclo_rapido else 5)
+                    time.sleep(0.2 if ciclo_rapido else 0.5)
+                time.sleep(0.2 if ciclo_rapido else 2)
+                ciclo_rapido = False
+        except Exception as e:
+            self.log(f"Exceção fatal no loop de operações: {e}")
+            import traceback
+            self.log(traceback.format_exc())
 
 if __name__ == "__main__":
     try:
