@@ -238,7 +238,7 @@ class RoboThread(threading.Thread):
         self.window.write_event_value('-STATS-', {'ops': ops, 'wins': wins, 'losses': losses, 'taxa': f"{taxa:.1f}%"})
 
     def verificar_condicoes_parada(self):
-        self.log(f"[CHECK] entradas_realizadas={self.entradas_realizadas}, entradas={self.config['entradas']}, stop_lucro={self.config['stop_lucro']}, lucro={self.lucro_acumulado}, alvo_lucro={self.config.get('lucro', 0.0)}, alvo_perda={self.config.get('perda', 0.0)}")
+        self.log(f"[CHECK] entradas_realizadas={self.entradas_realizadas}, entradas={self.config['entradas']}, stop_lucro={self.config['stop_lucro']}, lucro={self.lucro_acumulado}, alvo_lucro={self.config['lucro']}, alvo_perda={self.config['perda']}", 'magenta')
         if not self.config['stop_lucro']:
             if self.entradas_realizadas >= self.config['entradas']:
                 self.log(f"Robô parou: número máximo de entradas atingido ({self.entradas_realizadas}).", 'yellow')
@@ -396,33 +396,15 @@ def main():
             if not ativos_analise:
                 window['logs'].print(f"Selecione ao menos um ativo ou atualize a lista.", text_color='orange')
                 continue
-            melhores_resultados = []
             for ativo in ativos_analise:
                 try:
                     cat = catalogar_mhi(api_iq, ativo, minutos=50)
-                    # Extraia a assertividade do resultado de catalogar_mhi:
-                    # O texto é tipo: "Assertividade: {assertividade:.2f}%\n"
-                    for linha in cat.splitlines():
-                        if "Assertividade:" in linha:
-                            try:
-                                assertividade = float(linha.split("Assertividade:")[1].replace('%','').strip())
-                            except:
-                                assertividade = 0.0
-                            break
-                    else:
-                        assertividade = 0.0
-                    melhores_resultados.append({'ativo': ativo, 'cat': cat, 'assertividade': assertividade})
+                    indice, rep, tot = calcular_repeticao_velas(api_iq, ativo, minutos=50)
+                    window['logs'].print(cat, text_color="yellow")
+                    now = datetime.datetime.now().strftime('%H:%M:%S')
+                    window['logs'].print(f"[{now}] [{ativo}] Índice de repetição de velas: {indice:.2f}% ({rep}/{tot})", text_color="orange")
                 except Exception as e:
                     window['logs'].print(f"Erro ao catalogar {ativo}: {e}", text_color="red")
-            # Agora encontre o de maior assertividade:
-            if melhores_resultados:
-                melhor = max(melhores_resultados, key=lambda x: x['assertividade'])
-                window['logs'].print(melhor['cat'], text_color="yellow")
-                indice, rep, tot = calcular_repeticao_velas(api_iq, melhor['ativo'], minutos=50)
-                now = datetime.datetime.now().strftime('%H:%M:%S')
-                window['logs'].print(f"[{now}] [{melhor['ativo']}] Índice de repetição de velas: {indice:.2f}% ({rep}/{tot})", text_color="orange")
-            else:
-                window['logs'].print("Nenhum resultado encontrado.", text_color="orange")
 
         if event == 'busca_ativo':
             texto_busca = values['busca_ativo'].strip().upper()
