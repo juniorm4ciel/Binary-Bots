@@ -216,38 +216,53 @@ class MHIRobot:
             if not (agora.minute % 5 == 0 and agora.second == 0):
                 time.sleep(0.2)
                 continue
+
             quadrante_key = f"{agora.year}-{agora.month}-{agora.day} {agora.hour}:{(agora.minute // 5) * 5:02d}"
             for ativo in ativos:
                 with self.lock:
+                    # Se já operou neste quadrante para este ativo, pula
                     if self.ultimo_ciclo_operado.get(ativo) == quadrante_key:
                         continue
+                    # Marca como já operado para o ativo neste quadrante, ANTES de operar!
+                    self.ultimo_ciclo_operado[ativo] = quadrante_key
+
                     if self.stop_event.is_set():
                         return
                     if self.verificar_condicoes_parada():
                         return
+
                     self.log(f"Analisando velas do ativo {ativo}...", "#FFD700")
                     direcao = self.sinal_mhi(ativo)
+
                     if direcao is None:
                         self.log(f"Operação bloqueada no {ativo}: Detecção de doji ou empate nas velas.", "#FF8000")
-                        self.ultimo_ciclo_operado[ativo] = quadrante_key
                         continue
+
                     if self.config['adx']:
                         candles = self.get_candles(ativo, n=ADX_PERIOD+1, size=60)
                         adx, _, _ = calculate_adx(candles)
                         if adx is not None and adx >= ADX_LIMIAR:
                             self.log(f"Operação bloqueada no {ativo}: ADX acima do limiar (valor atual: {adx:.2f}).", "#FF8000")
-                            self.ultimo_ciclo_operado[ativo] = quadrante_key
                             continue
+
                     valor = self.config['valor']
                     exp = self.config['expiracao']
                     mg_nivel = 0
+                    operou = False  # Flag para só contar uma operação por ciclo por ativo
+
                     while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
-                        self.result_stats['ops'] += 1
+                        # Só conta operação na primeira entrada do ciclo
+                        if not operou:
+                            self.result_stats['ops'] += 1
+                            self.entradas_realizadas += 1
+                            operou = True
+
                         self.stats_callback(self._stats())
                         self.log(f"Entrando no ativo {ativo} | Entrada: {mg_nivel+1}/{mg_nivel_max+1} | {direcao.upper()} | Valor: {valor:.2f}", "#00FFFF")
                         resultado, lucro_op = self.buy(ativo, valor, direcao, exp)
                         self.lucro_acumulado += lucro_op
                         self.lucro_callback(self.lucro_acumulado)
+
                         if resultado is None and lucro_op == 0.0:
                             self.log(f"EMPATE (doji) em {ativo} | Valor devolvido.", "#FFD700")
                             self.stats_callback(self._stats())
@@ -256,12 +271,13 @@ class MHIRobot:
                             self.result_stats['wins'] += 1
                             self.log(f"WIN no {ativo} com {direcao.upper()} | Lucro: {lucro_op:.2f}", "#2DC937")
                             self.stats_callback(self._stats())
-                            break
-                        elif resultado is False:
+                            break  # <-- Sai do loop MG após WIN
+                        else:  # resultado is False
                             if mg_nivel < mg_nivel_max:
                                 self.log(f"LOSS no {ativo} | Indo para Martingale {mg_nivel+1}", "#FF8000")
                                 mg_nivel += 1
                                 valor *= 2
+                                # NÃO incrementa losses aqui!
                                 self.stats_callback(self._stats())
                                 continue
                             else:
@@ -269,20 +285,23 @@ class MHIRobot:
                                 self.log(f"LOSS no {ativo} com {direcao.upper()} | Perda: {lucro_op:.2f}", "#FF4040")
                                 self.stats_callback(self._stats())
                                 break
+
+                        # Soros só ativa se for WIN (resultado is True)
                         if self.config['soros'] > 0 and resultado is True:
                             aumento = lucro_op * (self.config['soros']/100)
                             valor += aumento
                             self.log(f"Soros ativado: próxima entrada {valor:.2f} (+{aumento:.2f})", "#00BFFF")
-                    self.entradas_realizadas += 1
-                    self.ultimo_ciclo_operado[ativo] = quadrante_key
+
                     if self.verificar_condicoes_parada():
                         return
+
             # Aguarda sair do início do quadrante para não operar mais de uma vez
             while True:
                 agora2 = datetime.datetime.now()
                 if not (agora2.minute % 5 == 0 and agora2.second == 0):
                     break
                 time.sleep(0.2)
+
         self.log("Robô finalizado pelo usuário.", "#FFA500")
 
     def verificar_condicoes_parada(self):
