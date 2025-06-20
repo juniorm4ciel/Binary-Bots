@@ -18,11 +18,7 @@ def calculate_adx(candles, period=ADX_PERIOD):
     minus_dm = lows[:-1] - lows[1:]
     plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
     minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    tr = np.maximum.reduce([
-        highs[1:] - lows[1:],
-        np.abs(highs[1:] - closes[:-1]),
-        np.abs(lows[1:] - closes[:-1])
-    ])
+    tr = np.maximum.reduce([highs[1:] - lows[1:], np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])])
     atr = np.zeros_like(tr)
     atr[0] = np.mean(tr[:period])
     for i in range(1, len(tr)):
@@ -97,6 +93,7 @@ def calcular_repeticao_velas(api, ativo, minutos=50):
 
 def build_layout():
     sg.theme('DarkAmber')
+    #sg.ChangeLookAndFeel('DarkAmber')
     col_ativos = [
         [sg.Text('Buscar ativo:'), sg.Input('', key='busca_ativo', size=(18,1), enable_events=True)],
         [sg.Text('Ativos Disponíveis')],
@@ -172,9 +169,9 @@ class RoboThread(threading.Thread):
         super().__init__()
         self.window = window
         self.config = config
+        self.api = api
         self.stop_event = threading.Event()
         self.result_stats = {'ops': 0, 'wins': 0, 'losses': 0}
-        self.api = api
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
 
@@ -195,7 +192,7 @@ class RoboThread(threading.Thread):
             return candles
         except Exception:
             return []
-
+        
     def buy(self, ativo, valor, direcao, exp):
         try:
             _, id = self.api.buy(valor, ativo, direcao, exp)
@@ -204,23 +201,35 @@ class RoboThread(threading.Thread):
                 return None, 0.0
             max_wait = 120
             start = time.time()
+
             while True:
                 status, lucro = self.api.check_win_v4(id)
                 if status is not None:
-                    return status, lucro
+                    if status == 'win':
+                        return True, lucro
+                    elif status == 'loose':
+                        return False, lucro
+                    elif status == 'equal':
+                        return None, lucro
+                    else:
+                        self.log(f"Status desconhecido retornado pela API: {status}", 'red')
+                        return None, lucro
+
                 if (time.time() - start) > max_wait:
                     self.log("Timeout ao obter resultado da ordem!", 'red')
                     return None, 0.0
+
                 if self.stop_event.is_set():
                     return None, 0.0
                 time.sleep(0.2)
+
         except Exception as e:
             self.log(f"Erro na ordem: {e}", 'red')
-            return None, 0.0
+            return None, 0.0    
 
     def sinal_mhi(self, ativo):
         candles = self.get_candles(ativo, n=5, size=60)
-        if not candles or len(candles) < 5:
+        if len(candles) < 5:
             return None
         ultimas_tres = candles[-3:]
         if any(c['close'] == c['open'] for c in ultimas_tres):
@@ -230,20 +239,14 @@ class RoboThread(threading.Thread):
             return 'put'
         elif cores.count('p') > cores.count('c'):
             return 'call'
-        else:
-            return None
+        return None
 
     def atualizar_stats(self):
         ops = self.result_stats['ops']
         wins = self.result_stats['wins']
         losses = self.result_stats['losses']
         taxa = (wins / ops * 100) if ops else 0
-        self.window.write_event_value('-STATS-', {
-            'ops': ops,
-            'wins': wins,
-            'losses': losses,
-            'taxa': f"{taxa:.1f}%"
-        })
+        self.window.write_event_value('-STATS-', {'ops': ops, 'wins': wins, 'losses': losses, 'taxa': f"{taxa:.1f}%"})
 
     def verificar_condicoes_parada(self):
         self.log(f"[CHECK] entradas_realizadas={self.entradas_realizadas}, entradas={self.config['entradas']}, stop_lucro={self.config['stop_lucro']}, lucro={self.lucro_acumulado}, alvo_lucro={self.config['lucro']}, alvo_perda={self.config['perda']}", 'magenta')
@@ -253,22 +256,18 @@ class RoboThread(threading.Thread):
                 self.window.write_event_value('-FIM-', None)
                 return True
         if self.config['stop_lucro']:
-            alvo_lucro = self.config['lucro']
-            alvo_perda = self.config['perda']
-            if alvo_lucro > 0 and self.lucro_acumulado >= alvo_lucro:
+            if self.lucro_acumulado >= self.config['lucro'] > 0:
                 self.log(f"Stop WIN atingido! Lucro: {self.lucro_acumulado:.2f}", 'yellow')
                 self.window.write_event_value('-FIM-', None)
                 return True
-            if alvo_perda > 0 and abs(self.lucro_acumulado) >= alvo_perda:
+            if abs(self.lucro_acumulado) >= self.config['perda'] > 0:
                 self.log(f"Stop LOSS atingido! Prejuízo: {self.lucro_acumulado:.2f}", 'yellow')
                 self.window.write_event_value('-FIM-', None)
                 return True
-        self.log("Verificação de parada: nenhuma condição atingida.", "yellow")
         return False
 
     def run(self):
         self.log("==== INICIANDO THREAD DO ROBO ====", "magenta")
-        self.log("Robô iniciado! Aguarde análise dos ativos...", 'yellow')
         ativos = list(self.config['ativos'])
         if not ativos:
             self.log("Nenhum ativo selecionado!", 'red')
@@ -291,67 +290,56 @@ class RoboThread(threading.Thread):
         while not self.stop_event.is_set():
             agora = datetime.datetime.now()
             quadrante = (agora.year, agora.month, agora.day, agora.hour, agora.minute // 5)
-            self.log(f"[LOOP] Agora: {agora}, Quadrante: {quadrante}, Ultimo_quadrante: {ultimo_quadrante}", "cyan")
-            # MARCA O QUADRANTE IMEDIATAMENTE
-            if quadrante != ultimo_quadrante and agora.minute % 5 == 0 and agora.second < 2:
-                ultimo_quadrante = quadrante  # MARCA LOGO!
-                self.log(f"[CICLO NOVO] Entrando no quadrante {quadrante} (minuto {agora.minute})", "cyan")
 
+            if quadrante != ultimo_quadrante and agora.minute % 5 == 0 and agora.second < 2:
+                ultimo_quadrante = quadrante
                 ativo = ativos[ativo_idx % len(ativos)]
                 ativo_idx += 1
 
-                self.log(f"Tentando sinal para o ativo {ativo}", "cyan")
+                self.log(f"[CICLO NOVO] Minuto {agora.minute} - Ativo: {ativo}", "cyan")
                 direcao = self.sinal_mhi(ativo)
-                if direcao is None:
-                    self.log(f"[{ativo}] Sem sinal MHI (doji/quadrante indefinido ou empate), pulando ciclo.", 'orange')
-                else:
-                    fez_operacao = False
-                    valor = self.config['valor']
-                    exp = self.config['expiracao']
-                    mg_nivel = 0
-                    while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
-                        self.log(f"Pre-operação: mg_nivel={mg_nivel}, valor={valor}", "cyan")
-                        self.result_stats['ops'] += 1
-                        self.atualizar_stats()
-                        self.log(f"Ativo: {ativo} | Entrada: {mg_nivel+1}/{mg_nivel_max+1} | {direcao.upper()} | Valor: {valor:.2f}", '#00FFFF')
-                        resultado, lucro_op = self.buy(ativo, valor, direcao, exp)
-                        fez_operacao = True
-                        self.lucro_acumulado += lucro_op
-                        self.window.write_event_value('-LUCRO-', self.lucro_acumulado)
-                        atualizar_lucro_display(self.window, self.lucro_acumulado)
-                        self.log(f"Pós-operação: resultado={resultado}, lucro_op={lucro_op}", "cyan")
-                        if resultado is None and lucro_op == 0.0:
-                            self.log(f"EMPATE (doji) em {ativo} | Valor devolvido.", 'yellow')
-                            self.atualizar_stats()
-                            break
-                        elif resultado is True:
-                            self.result_stats['wins'] += 1
-                            self.log(f"WIN no {ativo} com {direcao.upper()} | Lucro: {lucro_op:.2f}", 'green')
-                            self.atualizar_stats()
-                            break
-                        elif resultado is False:
-                            if mg_nivel < mg_nivel_max:
-                                self.log(f"LOSS no {ativo} | Indo para Martingale {mg_nivel+1}", 'orange')
-                                mg_nivel += 1
-                                valor *= 2
-                                self.atualizar_stats()
-                                continue
-                            else:
-                                self.result_stats['losses'] += 1
-                                self.log(f"LOSS no {ativo} com {direcao.upper()} | Perda: {lucro_op:.2f}", 'red')
-                                self.atualizar_stats()
-                                break
-                    if fez_operacao:
-                        self.entradas_realizadas += 1
 
-                self.log(f"Fim do ciclo/quadrante {quadrante} | entradas_realizadas={self.entradas_realizadas}", "cyan")
+                if direcao is None:
+                    self.log(f"[{ativo}] Sem sinal MHI, pulando ciclo.", 'orange')
+                    continue
+
+                mg_nivel = 0
+                valor = self.config['valor']
+                exp = self.config['expiracao']
+
+                while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
+                    self.log(f"Pre-operação: mg_nivel={mg_nivel}, valor={valor}", "cyan")
+                    self.result_stats['ops'] += 1
+                    self.atualizar_stats()
+
+                    resultado, lucro_op = self.buy(ativo, valor, direcao, exp)
+                    self.lucro_acumulado += lucro_op
+                    self.window.write_event_value('-LUCRO-', self.lucro_acumulado)
+                    atualizar_lucro_display(self.window, self.lucro_acumulado)
+
+                    if resultado is None and lucro_op == 0.0:
+                        self.log(f"EMPATE (doji) | Valor devolvido.", 'yellow')
+                        break
+                    elif resultado is True:
+                        self.result_stats['wins'] += 1
+                        self.log(f"WIN no {ativo} com {direcao.upper()} | Lucro: {lucro_op:.2f}", 'green')
+                        break
+                    else:
+                        if mg_nivel < mg_nivel_max:
+                            mg_nivel += 1
+                            valor *= 2
+                            self.log(f"LOSS | Indo para Martingale {mg_nivel}", 'orange')
+                        else:
+                            self.result_stats['losses'] += 1
+                            self.log(f"LOSS final no {ativo} após {mg_nivel_max} Martingales", 'red')
+                            break
+
+                self.entradas_realizadas += 1
 
                 if self.verificar_condicoes_parada():
-                    self.log("Parada detectada após ciclo/quadrante.", "red")
                     return
-            else:
-                self.log("[ESPERA] Não é quadrante novo ou não é início de quadrante, dormindo 0.5s...", "cyan")
-                time.sleep(0.5)
+
+            time.sleep(0.5)
 
         self.log("==== THREAD DO ROBO FINALIZADA ====", "magenta")
         self.log("Robô finalizado pelo usuário.", 'orange')
@@ -365,7 +353,6 @@ def main():
     ativos_cache = []
     ativos_mostrados = []
     api_iq = None
-
     relogio_atual = datetime.datetime.now().strftime('%H:%M:%S')
     window['relogio'].update(relogio_atual)
 
@@ -580,7 +567,6 @@ def main():
 
         if event == 'clear_log':
             window['logs'].update('')
-
     window.close()
 
 if __name__ == '__main__':
