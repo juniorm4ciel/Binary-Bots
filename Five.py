@@ -61,7 +61,7 @@ def get_direction(candle):
         return None
 
 class PowerBossRobot:
-    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor"):
+    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", on_finish=None):
         self.api = api
         self.config = config
         self.log = log_callback
@@ -72,6 +72,7 @@ class PowerBossRobot:
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
         self.direction_mode = direction_mode
+        self.on_finish = on_finish
 
     def get_candles(self, ativo, n=10, size=60):
         try:
@@ -111,6 +112,8 @@ class PowerBossRobot:
         ativos = list(self.config['ativos'])
         if not ativos:
             self.log("Nenhum ativo selecionado!", "#FF4040")
+            if self.on_finish:
+                self.on_finish()
             return
 
         self.lucro_acumulado = 0.0
@@ -158,6 +161,8 @@ class PowerBossRobot:
                 while datetime.datetime.now().minute != alvo_minuto:
                     if self.stop_event.is_set():
                         self.log("Robô parado pelo usuário.", "#FFA500")
+                        if self.on_finish:
+                            self.on_finish()
                         return
                     time.sleep(0.5)
 
@@ -216,11 +221,15 @@ class PowerBossRobot:
                             break
 
                 if self.verificar_condicoes_parada():
+                    if self.on_finish:
+                        self.on_finish()
                     return
                 time.sleep(3)
             else:
                 time.sleep(0.5)
         self.log("Robô finalizado pelo usuário.", "#FFA500")
+        if self.on_finish:
+            self.on_finish()
 
     def verificar_condicoes_parada(self):
         if not self.config['stop_lucro']:
@@ -434,6 +443,9 @@ class BotFullApp(tk.Tk):
 
         log_frame = ttk.LabelFrame(self, text="Log de eventos principais")
         log_frame.pack(fill="both", expand=True, padx=10, pady=4)
+        log_btns = ttk.Frame(log_frame)
+        log_btns.pack(anchor="e", padx=0, pady=0)
+        ttk.Button(log_btns, text="Limpar Log", command=self.clear_log).pack(side="right", padx=8, pady=2)
         self.text_log = tk.Text(log_frame, height=11, state="disabled", bg="#222", fg="#FFD700", font=("Consolas", 10))
         self.text_log.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -457,6 +469,11 @@ class BotFullApp(tk.Tk):
         self.text_log.tag_config(color, foreground=color)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
+
+    def clear_log(self):
+        self.text_log.config(state="normal")
+        self.text_log.delete(1.0, tk.END)
+        self.text_log.config(state="disabled")
 
     def connect_api(self):
         email = self.entry_email.get().strip()
@@ -508,10 +525,15 @@ class BotFullApp(tk.Tk):
         icon = "🌙" if self.theme_mode == "dark" else "☀️"
         label = "Modo Escuro" if self.theme_mode == "dark" else "Modo Claro"
         self.btn_theme.config(text=f"{icon} {label}")
-        bg = "#222" if self.theme_mode == "dark" else "#F5F6FA"
-        fg = "#FFD700" if self.theme_mode == "dark" else "#333"
+        # Ajuste de cor do log para melhor visualização no tema claro
+        if self.theme_mode == "dark":
+            bg = "#222"
+            fg = "#FFD700"
+        else:
+            bg = "#000"   # Preto para o log no tema claro
+            fg = "#FFD700"
         self.text_log.config(bg=bg, fg=fg)
-        self.configure(bg=bg)
+        self.configure(bg="#222" if self.theme_mode == "dark" else "#F5F6FA")
 
     def atualiza_ativos(self):
         if not self.api or not self.connected:
@@ -625,6 +647,13 @@ class BotFullApp(tk.Tk):
         self.lbl_robostatus.config(text="Operando", foreground="#FFB000")
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
+
+        def on_robot_finish():
+            self.robot_thread = None
+            self.lbl_robostatus.config(text="Parado", foreground="red")
+            self.btn_start.config(state="normal")
+            self.btn_stop.config(state="disabled")
+
         self.robot = PowerBossRobot(
             api=self.api,
             config=config,
@@ -632,7 +661,8 @@ class BotFullApp(tk.Tk):
             stats_callback=self.update_stats,
             lucro_callback=self.update_lucro,
             stop_event=self.robot_stop,
-            direction_mode=self.direction_mode.get()
+            direction_mode=self.direction_mode.get(),
+            on_finish=on_robot_finish
         )
         self.log_event("Robô iniciado! Aguardando próximo ciclo para operar...", "#2DC937")
         self.robot_thread = threading.Thread(target=self.robot.run, daemon=True)
@@ -641,6 +671,9 @@ class BotFullApp(tk.Tk):
     def stop_robot(self):
         if self.robot_stop:
             self.robot_stop.set()
+        if self.robot_thread and self.robot_thread.is_alive():
+            self.robot_thread.join(timeout=2)
+        self.robot_thread = None
         self.lbl_robostatus.config(text="Parado", foreground="red")
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
