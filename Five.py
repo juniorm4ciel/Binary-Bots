@@ -122,6 +122,7 @@ class PowerBossRobot:
         self.lucro_callback(self.lucro_acumulado)
         self.stats_callback({'ops': 0, 'wins': 0, 'losses': 0, 'taxa': "0%"})
         mg_nivel_max = int(self.config.get('mg_niveis', 1))
+        mg_percent = float(self.config.get('mg_percent', 200.0)) / 100.0  # padrão 200%
         ativo_idx = 0
 
         soros_percent = self.config.get('soros', 0)
@@ -168,17 +169,16 @@ class PowerBossRobot:
 
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                valor_entrada = 0
+                valor_entrada = valor_base
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
-                    # ----------- SOROS + MG LOGIC CORRIGIDA -----------
                     if mg_nivel == 0:
                         if soros_ativo and soros_nivel > 0:
                             valor_entrada = soros_valor
                         else:
                             valor_entrada = valor_base
                     else:
-                        valor_entrada = valor_entrada * 2
+                        valor_entrada = valor_entrada * mg_percent
 
                     self.result_stats['ops'] += 1
                     self.entradas_realizadas += 1
@@ -319,6 +319,7 @@ class BotFullApp(tk.Tk):
         self.robot_stop = threading.Event()
         self.ativos = []
         self.direction_mode = tk.StringVar(value="favor")
+        self.mg_percent = tk.StringVar(value="200")  # Valor default: 200%
         self.create_widgets()
         self.after(1000, self.update_clock)
 
@@ -386,23 +387,27 @@ class BotFullApp(tk.Tk):
         self.spin_soros = ttk.Spinbox(frame_config, from_=0, to=100, increment=5, width=5)
         self.spin_soros.set(0)
         self.spin_soros.grid(row=row, column=1, padx=4, pady=3)
+        # NOVO: Martingale (%)
+        ttk.Label(frame_config, text="Martingale (%):").grid(row=row, column=4, padx=4, pady=3, sticky="e")
+        self.entry_mg_percent = ttk.Entry(frame_config, width=5, textvariable=self.mg_percent)
+        self.entry_mg_percent.grid(row=row, column=5, padx=4, pady=3)
         self.var_otc = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Incluir OTC", variable=self.var_otc).grid(row=row, column=2, padx=4, pady=3)
         self.var_martingale = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Martingale", variable=self.var_martingale).grid(row=row, column=3, padx=4, pady=3)
-        ttk.Label(frame_config, text="Níveis MG:").grid(row=row, column=4, padx=4, pady=3, sticky="e")
-        self.combo_mg_niveis = ttk.Combobox(frame_config, values=["1", "2", "3", "4", "5"], width=4, state="readonly")
-        self.combo_mg_niveis.current(0)
-        self.combo_mg_niveis.grid(row=row, column=5, padx=4, pady=3)
         row += 1
+        ttk.Label(frame_config, text="Níveis MG:").grid(row=row, column=0, padx=4, pady=3, sticky="e")
+        self.combo_mg_niveis = ttk.Combobox(frame_config, values=["1", "2", "3", "4", "5"], width=4, state="readonly")
+        self.combo_mg_niveis.current(0)  # default 1
+        self.combo_mg_niveis.grid(row=row, column=1, padx=4, pady=3)
         self.var_adx = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame_config, text="Usar ADX (<21)", variable=self.var_adx).grid(row=row, column=0, padx=4, pady=3)
-        ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
+        ttk.Checkbutton(frame_config, text="Usar ADX (<21)", variable=self.var_adx).grid(row=row, column=2, padx=4, pady=3)
+        ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=3, padx=4, pady=3, sticky="e")
         self.entry_stopwin = ttk.Entry(frame_config, width=7)
-        self.entry_stopwin.grid(row=row, column=3, padx=4, pady=3)
-        ttk.Label(frame_config, text="Stop Loss $:").grid(row=row, column=4, padx=4, pady=3, sticky="e")
+        self.entry_stopwin.grid(row=row, column=4, padx=4, pady=3)
+        ttk.Label(frame_config, text="Stop Loss $:").grid(row=row, column=5, padx=4, pady=3, sticky="e")
         self.entry_stoploss = ttk.Entry(frame_config, width=7)
-        self.entry_stoploss.grid(row=row, column=5, padx=4, pady=3)
+        self.entry_stoploss.grid(row=row, column=6, padx=4, pady=3)
         row += 1
         self.var_stop = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame_config, text="Operar por Lucro/Stop Loss", variable=self.var_stop).grid(row=row, column=0, padx=4, pady=3)
@@ -525,12 +530,11 @@ class BotFullApp(tk.Tk):
         icon = "🌙" if self.theme_mode == "dark" else "☀️"
         label = "Modo Escuro" if self.theme_mode == "dark" else "Modo Claro"
         self.btn_theme.config(text=f"{icon} {label}")
-        # Ajuste de cor do log para melhor visualização no tema claro
         if self.theme_mode == "dark":
             bg = "#222"
             fg = "#FFD700"
         else:
-            bg = "#000"   # Preto para o log no tema claro
+            bg = "#000"
             fg = "#FFD700"
         self.text_log.config(bg=bg, fg=fg)
         self.configure(bg="#222" if self.theme_mode == "dark" else "#F5F6FA")
@@ -626,6 +630,7 @@ class BotFullApp(tk.Tk):
             self.log_event("Selecione ao menos um ativo ou atualize a lista.", "#FF8000")
             return
         try:
+            mg_percent = float(self.mg_percent.get().replace(",", ".")) if self.mg_percent.get() else 200.0
             config = {
                 "valor": float(self.entry_valor.get().replace(",", ".")),
                 "expiracao": int(self.combo_exp.get()),
@@ -634,6 +639,7 @@ class BotFullApp(tk.Tk):
                 "otc": self.var_otc.get(),
                 "martingale": self.var_martingale.get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
+                "mg_percent": mg_percent,
                 "adx": self.var_adx.get(),
                 "stop_lucro": self.var_stop.get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
