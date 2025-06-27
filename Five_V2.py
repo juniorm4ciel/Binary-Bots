@@ -2,16 +2,17 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import datetime
+import sv_ttk
 import time
 import numpy as np
 
+#pip install sv-ttk
 # ================== UTILS ==================
 def format_money(valor):
     return f"{valor:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 def set_azure_theme(root, mode="dark"):
     try:
-        import sv_ttk
         sv_ttk.set_theme("dark" if mode == "dark" else "light")
     except ImportError:
         root.configure(bg="#222" if mode == "dark" else "#F5F6FA")
@@ -61,7 +62,7 @@ def get_direction(candle):
         return None
 
 class PowerBossRobot:
-    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", on_finish=None):
+    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor"):
         self.api = api
         self.config = config
         self.log = log_callback
@@ -72,7 +73,6 @@ class PowerBossRobot:
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
         self.direction_mode = direction_mode
-        self.on_finish = on_finish
 
     def get_candles(self, ativo, n=10, size=60):
         try:
@@ -82,14 +82,14 @@ class PowerBossRobot:
 
     def buy(self, ativo, valor, direcao, exp):
         try:
-            _, id = self.api.buy(valor, ativo, direcao, exp)
+            _, order_id = self.api.buy(valor, ativo, direcao, exp)
             if not id:
                 self.log("Falha ao enviar ordem para {}.".format(ativo), "#FF4040")
                 return None, 0.0
             max_wait = 120
             start = time.time()
             while True:
-                status, lucro = self.api.check_win_v4(id)
+                status, lucro = self.api.check_win_v4(order_id)
                 if status is not None:
                     if status == 'win' or status is True:
                         return True, lucro
@@ -112,17 +112,14 @@ class PowerBossRobot:
         ativos = list(self.config['ativos'])
         if not ativos:
             self.log("Nenhum ativo selecionado!", "#FF4040")
-            if self.on_finish:
-                self.on_finish()
             return
 
-        # Não zera o lucro acumulado ao iniciar
+        self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
         self.result_stats = {'ops': 0, 'wins': 0, 'losses': 0}
         self.lucro_callback(self.lucro_acumulado)
         self.stats_callback({'ops': 0, 'wins': 0, 'losses': 0, 'taxa': "0%"})
         mg_nivel_max = int(self.config.get('mg_niveis', 1))
-        mg_percent = float(self.config.get('mg_percent', 200.0)) / 100.0  # padrão 200%
         ativo_idx = 0
 
         soros_percent = self.config.get('soros', 0)
@@ -162,23 +159,22 @@ class PowerBossRobot:
                 while datetime.datetime.now().minute != alvo_minuto:
                     if self.stop_event.is_set():
                         self.log("Robô parado pelo usuário.", "#FFA500")
-                        if self.on_finish:
-                            self.on_finish()
                         return
                     time.sleep(0.5)
 
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                valor_entrada = valor_base
+                valor_entrada = 0
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
+                    # ----------- SOROS + MG LOGIC CORRIGIDA -----------
                     if mg_nivel == 0:
                         if soros_ativo and soros_nivel > 0:
                             valor_entrada = soros_valor
                         else:
                             valor_entrada = valor_base
                     else:
-                        valor_entrada = valor_entrada * mg_percent
+                        valor_entrada = valor_entrada * 2
 
                     self.result_stats['ops'] += 1
                     self.entradas_realizadas += 1
@@ -221,15 +217,11 @@ class PowerBossRobot:
                             break
 
                 if self.verificar_condicoes_parada():
-                    if self.on_finish:
-                        self.on_finish()
                     return
                 time.sleep(3)
             else:
                 time.sleep(0.5)
         self.log("Robô finalizado pelo usuário.", "#FFA500")
-        if self.on_finish:
-            self.on_finish()
 
     def verificar_condicoes_parada(self):
         if not self.config['stop_lucro']:
@@ -280,10 +272,7 @@ def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="fav
             if candle_ent['close'] == candle_ent['open']:
                 resultado = None
                 break
-            win = (
-                (direcao_entrada == 'call' and candle_ent['close'] > candle_ent['open']) or
-                (direcao_entrada == 'put' and candle_ent['close'] < candle_ent['open'])
-            )
+            win = ((direcao_entrada == 'call' and candle_ent['close'] > candle_ent['open']) or (direcao_entrada == 'put' and candle_ent['close'] < candle_ent['open']))
             if win:
                 resultado = mg
                 break
@@ -319,8 +308,6 @@ class BotFullApp(tk.Tk):
         self.robot_stop = threading.Event()
         self.ativos = []
         self.direction_mode = tk.StringVar(value="favor")
-        self.mg_percent = tk.StringVar(value="200")  # Valor default: 200%
-        self.lucro_atual = 0.0  # <-- Armazena o lucro acumulado da sessão
         self.create_widgets()
         self.after(1000, self.update_clock)
 
@@ -349,7 +336,6 @@ class BotFullApp(tk.Tk):
         self.btn_theme.grid(row=0, column=10, padx=10, pady=4)
 
         main = ttk.Frame(self)
-        self.main = main
         main.pack(fill="both", expand=True, padx=10, pady=5)
         main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=2)
@@ -389,27 +375,23 @@ class BotFullApp(tk.Tk):
         self.spin_soros = ttk.Spinbox(frame_config, from_=0, to=100, increment=5, width=5)
         self.spin_soros.set(0)
         self.spin_soros.grid(row=row, column=1, padx=4, pady=3)
-        # NOVO: Martingale (%)
-        ttk.Label(frame_config, text="Martingale (%):").grid(row=row, column=4, padx=4, pady=3, sticky="e")
-        self.entry_mg_percent = ttk.Entry(frame_config, width=5, textvariable=self.mg_percent)
-        self.entry_mg_percent.grid(row=row, column=5, padx=4, pady=3)
         self.var_otc = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Incluir OTC", variable=self.var_otc).grid(row=row, column=2, padx=4, pady=3)
         self.var_martingale = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Martingale", variable=self.var_martingale).grid(row=row, column=3, padx=4, pady=3)
-        row += 1
-        ttk.Label(frame_config, text="Níveis MG:").grid(row=row, column=0, padx=4, pady=3, sticky="e")
+        ttk.Label(frame_config, text="Níveis MG:").grid(row=row, column=4, padx=4, pady=3, sticky="e")
         self.combo_mg_niveis = ttk.Combobox(frame_config, values=["1", "2", "3", "4", "5"], width=4, state="readonly")
-        self.combo_mg_niveis.current(0)  # default 1
-        self.combo_mg_niveis.grid(row=row, column=1, padx=4, pady=3)
+        self.combo_mg_niveis.current(0)
+        self.combo_mg_niveis.grid(row=row, column=5, padx=4, pady=3)
+        row += 1
         self.var_adx = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame_config, text="Usar ADX (<21)", variable=self.var_adx).grid(row=row, column=2, padx=4, pady=3)
-        ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=3, padx=4, pady=3, sticky="e")
+        ttk.Checkbutton(frame_config, text="Usar ADX (<21)", variable=self.var_adx).grid(row=row, column=0, padx=4, pady=3)
+        ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
         self.entry_stopwin = ttk.Entry(frame_config, width=7)
-        self.entry_stopwin.grid(row=row, column=4, padx=4, pady=3)
-        ttk.Label(frame_config, text="Stop Loss $:").grid(row=row, column=5, padx=4, pady=3, sticky="e")
+        self.entry_stopwin.grid(row=row, column=3, padx=4, pady=3)
+        ttk.Label(frame_config, text="Stop Loss $:").grid(row=row, column=4, padx=4, pady=3, sticky="e")
         self.entry_stoploss = ttk.Entry(frame_config, width=7)
-        self.entry_stoploss.grid(row=row, column=6, padx=4, pady=3)
+        self.entry_stoploss.grid(row=row, column=5, padx=4, pady=3)
         row += 1
         self.var_stop = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame_config, text="Operar por Lucro/Stop Loss", variable=self.var_stop).grid(row=row, column=0, padx=4, pady=3)
@@ -443,21 +425,13 @@ class BotFullApp(tk.Tk):
         ttk.Label(stats, text="Taxa:").grid(row=0, column=6, padx=4, pady=2)
         self.lbl_taxa = ttk.Label(stats, text="0%")
         self.lbl_taxa.grid(row=0, column=7)
-        # LUCRO ATUAL com botão de reset
-        frame_lucro = ttk.LabelFrame(main, text="Lucro Atual")
+        frame_lucro = ttk.LabelFrame(main, text="Lucro/Prejuízo Atual")
         frame_lucro.grid(row=0, column=2, sticky="nswe", padx=6, pady=4)
-        lucro_row = ttk.Frame(frame_lucro)
-        lucro_row.pack(padx=3, pady=6, fill="x")
-        self.lbl_lucro = ttk.Label(lucro_row, text="R$ 0,00", font=("Arial", 22, "bold"), foreground="green")
-        self.lbl_lucro.pack(side="left", padx=(0, 8))
-        self.btn_reset_lucro = ttk.Button(lucro_row, text="🔄 Resetar", command=self.reset_lucro, width=9)
-        self.btn_reset_lucro.pack(side="left")
+        self.lbl_lucro = ttk.Label(frame_lucro, text="R$ 0,00", font=("Arial", 22, "bold"), foreground="green")
+        self.lbl_lucro.pack(padx=3, pady=6)
 
         log_frame = ttk.LabelFrame(self, text="Log de eventos principais")
         log_frame.pack(fill="both", expand=True, padx=10, pady=4)
-        log_btns = ttk.Frame(log_frame)
-        log_btns.pack(anchor="e", padx=0, pady=0)
-        ttk.Button(log_btns, text="Limpar Log", command=self.clear_log).pack(side="right", padx=8, pady=2)
         self.text_log = tk.Text(log_frame, height=11, state="disabled", bg="#222", fg="#FFD700", font=("Consolas", 10))
         self.text_log.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -481,11 +455,6 @@ class BotFullApp(tk.Tk):
         self.text_log.tag_config(color, foreground=color)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
-
-    def clear_log(self):
-        self.text_log.config(state="normal")
-        self.text_log.delete(1.0, tk.END)
-        self.text_log.config(state="disabled")
 
     def connect_api(self):
         email = self.entry_email.get().strip()
@@ -529,8 +498,6 @@ class BotFullApp(tk.Tk):
         self.btn_connect.config(state="normal")
         self.btn_disconnect.config(state="disabled")
         self.lbl_saldo.config(text="Saldo: --")
-        self.lucro_atual = 0.0  # <-- Zera lucro ao desconectar
-        self.lbl_lucro.config(text="R$ 0,00", foreground="green")
         self.log_event("Desconectado da corretora.", "#FF4040")
 
     def toggle_theme(self):
@@ -539,35 +506,33 @@ class BotFullApp(tk.Tk):
         icon = "🌙" if self.theme_mode == "dark" else "☀️"
         label = "Modo Escuro" if self.theme_mode == "dark" else "Modo Claro"
         self.btn_theme.config(text=f"{icon} {label}")
-        if self.theme_mode == "dark":
-            bg = "#222"
-            fg = "#FFD700"
-        else:
-            bg = "#000"
-            fg = "#FFD700"
+        bg = "#222" if self.theme_mode == "dark" else "#F5F6FA"
+        fg = "#FFD700" if self.theme_mode == "dark" else "#333"
         self.text_log.config(bg=bg, fg=fg)
-        self.configure(bg="#222" if self.theme_mode == "dark" else "#F5F6FA")
+        self.configure(bg=bg)
 
     def atualiza_ativos(self):
         if not self.api or not self.connected:
             self.log_event("Conecte-se para buscar ativos.", "#FF4040")
             return
+
         self.log_event("Buscando lista de ativos...", "#00BFFF")
         self.update()
         try:
             ativos_all = self.api.get_all_open_time()
-            ativos = []
-            for tipo in ['turbo', 'binary']:
+            ativos = set()#        ALTERADO AQUI DE [] PARA set()
+            for tipo in ['turbo']:#        ALTERADO AQUI REMOVIDO 'binary'
                 for ativo, status_ativo in ativos_all[tipo].items():
                     if status_ativo['open']:
                         if tipo == "turbo" and (not self.var_otc.get() and '-OTC' in ativo):
                             continue
-                        ativos.append(ativo)
+                        ativos.add(ativo)#        ALTERADO  DE append PARA add
+
             self.ativos = sorted(ativos)
             self.update_ativos_list()
             self.log_event(f"Ativos atualizados ({len(self.ativos)} ativos abertos).", "#2DC937")
         except Exception as e:
-            self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")
+            self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")            
 
     def update_ativos_list(self, filtrar=""):
         self.list_ativos.delete(0, tk.END)
@@ -602,12 +567,7 @@ class BotFullApp(tk.Tk):
         self.log_event("Analisando assertividade dos ativos...", "#FFA500")
         for ativo in ativos_analisar:
             try:
-                res = catalogar_powerboss(
-                    self.api, ativo, minutos=50,
-                    mg_niveis=mg_niveis,
-                    direction_mode=direction_mode,
-                    use_adx=use_adx
-                )
+                res = catalogar_powerboss(self.api, ativo, minutos=50, mg_niveis=mg_niveis, direction_mode=direction_mode, use_adx=use_adx)
                 if res:
                     resultados.append(res)
             except Exception as e:
@@ -617,14 +577,8 @@ class BotFullApp(tk.Tk):
             return
         melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)[:3]
         for r in melhores:
-            wins_str = " | ".join(
-                [f"Wins 1ª: {r['wins'][0]}"] +
-                [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))]
-            )
-            msg = (
-                f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | "
-                f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}"
-            )
+            wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
+            msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
             self.log_event(msg, "#FFD700")
 
     def start_robot(self):
@@ -639,7 +593,6 @@ class BotFullApp(tk.Tk):
             self.log_event("Selecione ao menos um ativo ou atualize a lista.", "#FF8000")
             return
         try:
-            mg_percent = float(self.mg_percent.get().replace(",", ".")) if self.mg_percent.get() else 200.0
             config = {
                 "valor": float(self.entry_valor.get().replace(",", ".")),
                 "expiracao": int(self.combo_exp.get()),
@@ -648,7 +601,6 @@ class BotFullApp(tk.Tk):
                 "otc": self.var_otc.get(),
                 "martingale": self.var_martingale.get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
-                "mg_percent": mg_percent,
                 "adx": self.var_adx.get(),
                 "stop_lucro": self.var_stop.get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
@@ -662,15 +614,6 @@ class BotFullApp(tk.Tk):
         self.lbl_robostatus.config(text="Operando", foreground="#FFB000")
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-
-        def on_robot_finish():
-            self.robot_thread = None
-            self.lbl_robostatus.config(text="Parado", foreground="red")
-            self.btn_start.config(state="normal")
-            self.btn_stop.config(state="disabled")
-            # NÃO zera o lucro ao parar o robô
-
-        # Passa o callback que atualiza self.lucro_atual
         self.robot = PowerBossRobot(
             api=self.api,
             config=config,
@@ -678,11 +621,8 @@ class BotFullApp(tk.Tk):
             stats_callback=self.update_stats,
             lucro_callback=self.update_lucro,
             stop_event=self.robot_stop,
-            direction_mode=self.direction_mode.get(),
-            on_finish=on_robot_finish
+            direction_mode=self.direction_mode.get()
         )
-        # Define o lucro inicial do robô igual ao que está na tela
-        self.robot.lucro_acumulado = self.lucro_atual
         self.log_event("Robô iniciado! Aguardando próximo ciclo para operar...", "#2DC937")
         self.robot_thread = threading.Thread(target=self.robot.run, daemon=True)
         self.robot_thread.start()
@@ -690,14 +630,10 @@ class BotFullApp(tk.Tk):
     def stop_robot(self):
         if self.robot_stop:
             self.robot_stop.set()
-        if self.robot_thread and self.robot_thread.is_alive():
-            self.robot_thread.join(timeout=2)
-        self.robot_thread = None
         self.lbl_robostatus.config(text="Parado", foreground="red")
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
         self.log_event("Robô parado.", "#FF8000")
-        # NÃO zera o lucro ao parar o robô - só zera ao resetar ou desconectar
 
     def update_stats(self, stats):
         self.lbl_ops.config(text=str(stats['ops']))
@@ -706,23 +642,11 @@ class BotFullApp(tk.Tk):
         self.lbl_taxa.config(text=stats['taxa'])
 
     def update_lucro(self, valor):
-        # valor: lucro acumulado passado pela thread do robô
-        self.lucro_atual = valor
         cor = "green" if valor >= 0 else "red"
         sinal = "" if valor >= 0 else "-"
         valor_abs = abs(valor)
         texto = f"R${sinal}{valor_abs:,.2f}".replace('.', ',')
         self.lbl_lucro.config(text=texto, foreground=cor)
-
-    def reset_lucro(self):
-        self.lucro_atual = 0.0
-        self.lbl_lucro.config(text="R$ 0,00", foreground="green")
-        self.log_event("Lucro atual resetado pelo usuário.", "#FFA500")
-        # Se houver um robô rodando, também zerar o acumulado do robô
-        if self.robot:
-            self.robot.lucro_acumulado = 0.0
-            if hasattr(self.robot, "lucro_callback") and callable(self.robot.lucro_callback):
-                self.robot.lucro_callback(0.0)
 
 if __name__ == "__main__":
     app = BotFullApp()
