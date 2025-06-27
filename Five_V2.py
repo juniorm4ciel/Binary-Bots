@@ -4,10 +4,40 @@ import threading
 import datetime
 import sv_ttk
 import time
-import numpy as np
+import os
+import json
 
-#pip install sv-ttk
-# ================== UTILS ==================
+# Caminhos padrão dos sons
+DEFAULT_SOUNDS = {
+    "entry": "sounds/entrada.wav",
+    "win":   "sounds/win.wav",
+    "loss":  "sounds/loss.wav",
+    "limit": "sounds/limit.wav",
+    "conexao": "sounds/conexao.wav"
+}
+
+def play_sound(sound_file=None, freq=None, dur=None):
+    if sound_file:
+        ext = os.path.splitext(sound_file)[1].lower()
+        if ext == ".wav":
+            try:
+                import winsound
+                winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                return
+            except Exception:
+                pass
+        try:
+            import playsound
+            playsound.playsound(sound_file, False)
+        except Exception:
+            pass
+    elif freq and dur:
+        try:
+            import winsound
+            winsound.Beep(freq, dur)
+        except Exception:
+            pass
+
 def format_money(valor):
     return f"{valor:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
@@ -17,7 +47,6 @@ def set_azure_theme(root, mode="dark"):
     except ImportError:
         root.configure(bg="#222" if mode == "dark" else "#F5F6FA")
 
-# ================== API WRAPPER ==================
 class IQOptionAPI:
     def __init__(self, email, password):
         from iqoptionapi.stable_api import IQ_Option
@@ -52,7 +81,6 @@ class IQOptionAPI:
     def check_win_v4(self, order_id):
         return self.api.check_win_v4(order_id)
 
-# ================== QUADRANTE LOGIC ==================
 def get_direction(candle):
     if candle['close'] > candle['open']:
         return 'call'
@@ -62,7 +90,7 @@ def get_direction(candle):
         return None
 
 class PowerBossRobot:
-    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor"):
+    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", sound_callback=None):
         self.api = api
         self.config = config
         self.log = log_callback
@@ -73,6 +101,7 @@ class PowerBossRobot:
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
         self.direction_mode = direction_mode
+        self.sound_callback = sound_callback
 
     def get_candles(self, ativo, n=10, size=60):
         try:
@@ -81,6 +110,8 @@ class PowerBossRobot:
             return []
 
     def buy(self, ativo, valor, direcao, exp):
+        if self.sound_callback:
+            self.sound_callback("entry")
         try:
             _, order_id = self.api.buy(valor, ativo, direcao, exp)
             if not id:
@@ -92,8 +123,12 @@ class PowerBossRobot:
                 status, lucro = self.api.check_win_v4(order_id)
                 if status is not None:
                     if status == 'win' or status is True:
+                        if self.sound_callback:
+                            self.sound_callback("win")
                         return True, lucro
                     elif status == 'loose' or status is False:
+                        if self.sound_callback:
+                            self.sound_callback("loss")
                         return False, lucro
                     elif status == 'equal' or status is None:
                         return None, lucro
@@ -167,7 +202,6 @@ class PowerBossRobot:
                 valor_entrada = 0
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
-                    # ----------- SOROS + MG LOGIC CORRIGIDA -----------
                     if mg_nivel == 0:
                         if soros_ativo and soros_nivel > 0:
                             valor_entrada = soros_valor
@@ -217,11 +251,15 @@ class PowerBossRobot:
                             break
 
                 if self.verificar_condicoes_parada():
+                    if self.sound_callback:
+                        self.sound_callback("limit")
                     return
                 time.sleep(3)
             else:
                 time.sleep(0.5)
         self.log("Robô finalizado pelo usuário.", "#FFA500")
+        if self.sound_callback:
+            self.sound_callback("limit")
 
     def verificar_condicoes_parada(self):
         if not self.config['stop_lucro']:
@@ -246,7 +284,6 @@ class PowerBossRobot:
         taxa = (wins / ops * 100) if ops else 0
         return {'ops': ops, 'wins': wins, 'losses': losses, 'taxa': f"{taxa:.1f}%"}
 
-# ================== ASSERTIVIDADE QUADRANTE ==================
 def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="favor", use_adx=True):
     candles = api.get_candles(ativo, 60, minutos + (mg_niveis + 2) * 5)
     if not candles or len(candles) < (mg_niveis + 2) * 5:
@@ -292,12 +329,33 @@ def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="fav
         'mg_niveis': mg_niveis
     }
 
-# ================== TKINTER APP ==================
 class BotFullApp(tk.Tk):
+    LOG_COLORS = {
+        "dark": {
+            "#FFD700": "#FFD700",
+            "#00BFFF": "#00BFFF",
+            "#2DC937": "#00FF00",
+            "#FF4040": "#FF3030",
+            "#FF8000": "#FFA500",
+            "#FFA500": "#FFD700",
+            "#00FFFF": "#00FFFF",
+        },
+        "light": {
+            "#FFD700": "#FFD700",
+            "#00BFFF": "#00BFFF",
+            "#2DC937": "#00FF00",
+            "#FF4040": "#FF3030",
+            "#FF8000": "#FFA500",
+            "#FFA500": "#FFD700",
+            "#00FFFF": "#00FFFF",
+        },
+        "default": "#FFFFFF"
+    }
+
     def __init__(self):
         super().__init__()
         self.title("Robô Power Boss - Tkinter Azure Full")
-        self.geometry("1050x680")
+        self.geometry("1050x720")
         self.resizable(True, True)
         self.theme_mode = "dark"
         set_azure_theme(self, self.theme_mode)
@@ -308,8 +366,35 @@ class BotFullApp(tk.Tk):
         self.robot_stop = threading.Event()
         self.ativos = []
         self.direction_mode = tk.StringVar(value="favor")
+        self.lucro_acumulado_display = 0.0
+
+        self.sound_files = {
+            "entry": "",
+            "win": "",
+            "loss": "",
+            "limit": ""
+        }
+        self.load_sound_config()
         self.create_widgets()
         self.after(1000, self.update_clock)
+
+    def save_sound_config(self):
+        try:
+            with open("sons.json", "w") as f:
+                json.dump(self.sound_files, f)
+        except Exception:
+            pass
+
+    def load_sound_config(self):
+        if os.path.exists("sons.json"):
+            try:
+                with open("sons.json", "r") as f:
+                    arquivos = json.load(f)
+                    for k in self.sound_files:
+                        if k in arquivos:
+                            self.sound_files[k] = arquivos[k]
+            except Exception:
+                pass
 
     def create_widgets(self):
         frame_conn = ttk.LabelFrame(self, text="Conexão")
@@ -335,15 +420,15 @@ class BotFullApp(tk.Tk):
         self.btn_theme = ttk.Button(frame_conn, text="🌙 Modo Escuro", command=self.toggle_theme)
         self.btn_theme.grid(row=0, column=10, padx=10, pady=4)
 
-        main = ttk.Frame(self)
-        main.pack(fill="both", expand=True, padx=10, pady=5)
-        main.columnconfigure(0, weight=1)
-        main.columnconfigure(1, weight=2)
-        main.columnconfigure(2, weight=2)
-        main.rowconfigure(0, weight=1)
-        main.rowconfigure(1, weight=1)
+        self.main = ttk.Frame(self)
+        self.main.pack(fill="both", expand=True, padx=10, pady=5)
+        self.main.columnconfigure(0, weight=1)
+        self.main.columnconfigure(1, weight=2)
+        self.main.columnconfigure(2, weight=2)
+        self.main.rowconfigure(0, weight=1)
+        self.main.rowconfigure(1, weight=1)
 
-        frame_ativos = ttk.LabelFrame(main, text="Ativos")
+        frame_ativos = ttk.LabelFrame(self.main, text="Ativos")
         frame_ativos.grid(row=0, column=0, rowspan=2, sticky="nswe", padx=6, pady=4)
         self.entry_busca_ativo = ttk.Entry(frame_ativos, width=17)
         self.entry_busca_ativo.pack(padx=5, pady=3)
@@ -355,7 +440,7 @@ class BotFullApp(tk.Tk):
         ttk.Button(btns_ativos, text="Atualizar Ativos", command=self.atualiza_ativos).pack(side="left", padx=3)
         ttk.Button(btns_ativos, text="Analisar Assertividade", command=self.catalogar_ativo).pack(side="left", padx=3)
 
-        frame_config = ttk.LabelFrame(main, text="Configuração do Robô")
+        frame_config = ttk.LabelFrame(self.main, text="Configuração do Robô")
         frame_config.grid(row=0, column=1, sticky="nswe", padx=6, pady=4)
         row = 0
         ttk.Label(frame_config, text="Valor $:").grid(row=row, column=0, padx=4, pady=3, sticky="e")
@@ -401,7 +486,7 @@ class BotFullApp(tk.Tk):
         rb_favor.grid(row=row, column=3, padx=4, pady=3)
         rb_contra.grid(row=row, column=4, padx=4, pady=3)
 
-        frame_ctrl = ttk.LabelFrame(main, text="Controle")
+        frame_ctrl = ttk.LabelFrame(self.main, text="Controle")
         frame_ctrl.grid(row=1, column=1, sticky="nswe", padx=6, pady=4)
         self.btn_start = ttk.Button(frame_ctrl, text="▶️ Iniciar Robô", command=self.start_robot)
         self.btn_start.grid(row=0, column=0, padx=8, pady=9)
@@ -411,7 +496,7 @@ class BotFullApp(tk.Tk):
         self.lbl_robostatus = ttk.Label(frame_ctrl, text="Inativo", foreground="red")
         self.lbl_robostatus.grid(row=0, column=3, padx=6, pady=9)
 
-        stats = ttk.LabelFrame(main, text="Estatísticas")
+        stats = ttk.LabelFrame(self.main, text="Estatísticas")
         stats.grid(row=1, column=2, sticky="nswe", padx=6, pady=4)
         ttk.Label(stats, text="Op.:").grid(row=0, column=0, padx=4, pady=2)
         self.lbl_ops = ttk.Label(stats, text="0")
@@ -425,21 +510,50 @@ class BotFullApp(tk.Tk):
         ttk.Label(stats, text="Taxa:").grid(row=0, column=6, padx=4, pady=2)
         self.lbl_taxa = ttk.Label(stats, text="0%")
         self.lbl_taxa.grid(row=0, column=7)
-        frame_lucro = ttk.LabelFrame(main, text="Lucro/Prejuízo Atual")
+        frame_lucro = ttk.LabelFrame(self.main, text="Lucro/Prejuízo Atual")
         frame_lucro.grid(row=0, column=2, sticky="nswe", padx=6, pady=4)
         self.lbl_lucro = ttk.Label(frame_lucro, text="R$ 0,00", font=("Arial", 22, "bold"), foreground="green")
-        self.lbl_lucro.pack(padx=3, pady=6)
+        self.lbl_lucro.pack(side="left", padx=3, pady=6)
+        self.btn_lucro_reset = ttk.Button(frame_lucro, text="🔄 Reset", command=self.reset_lucro)
+        self.btn_lucro_reset.pack(side="left", padx=8, pady=6)
 
         log_frame = ttk.LabelFrame(self, text="Log de eventos principais")
         log_frame.pack(fill="both", expand=True, padx=10, pady=4)
-        self.text_log = tk.Text(log_frame, height=11, state="disabled", bg="#222", fg="#FFD700", font=("Consolas", 10))
-        self.text_log.pack(fill="both", expand=True, padx=4, pady=4)
+        log_and_btn_frame = ttk.Frame(log_frame)
+        log_and_btn_frame.pack(fill="both", expand=True, padx=0, pady=0)
+        btn_clear_log = ttk.Button(log_and_btn_frame, text="🧹 Limpar Log", command=self.clear_log)
+        btn_clear_log.pack(side="right", padx=6, pady=4)
+        self.text_log = tk.Text(log_and_btn_frame, height=11, state="disabled", bg="#000000", fg="#FFD700", font=("Consolas", 10))
+        self.text_log.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
         clockf = ttk.Frame(self)
         clockf.pack(anchor="e", padx=14)
         ttk.Label(clockf, text="Horário:").pack(side="left")
         self.lbl_clock = ttk.Label(clockf, text="")
         self.lbl_clock.pack(side="left")
+
+    def clear_log(self):
+        self.text_log.config(state="normal")
+        self.text_log.delete(1.0, tk.END)
+        self.text_log.config(state="disabled")
+
+    def robot_sound(self, event):
+        file = self.sound_files.get(event)
+        if not file:
+            file = DEFAULT_SOUNDS.get(event)
+        if file and os.path.exists(file):
+            play_sound(sound_file=file)
+        else:
+            if event == "entry":
+                play_sound(freq=880, dur=180)
+            elif event == "win":
+                play_sound(freq=1200, dur=250)
+            elif event == "loss":
+                play_sound(freq=400, dur=300)
+            elif event == "limit":
+                play_sound(freq=500, dur=180)
+                play_sound(freq=800, dur=220)
+                play_sound(freq=500, dur=180)
 
     def update_clock(self):
         from datetime import datetime
@@ -451,10 +565,17 @@ class BotFullApp(tk.Tk):
         msg = f"[{now}] {msg}"
         self.text_log.config(state="normal")
         self.text_log.insert("end", f"{msg}\n")
-        self.text_log.tag_add(color, "end-2l linestart", "end-2l lineend")
-        self.text_log.tag_config(color, foreground=color)
+        tag_color = self.get_log_color(color)
+        self.text_log.tag_add(tag_color, "end-2l linestart", "end-2l lineend")
+        self.text_log.tag_config(tag_color, foreground=tag_color)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
+
+    def get_log_color(self, color):
+        if self.theme_mode == "dark":
+            return self.LOG_COLORS["dark"].get(color, self.LOG_COLORS["default"])
+        else:
+            return self.LOG_COLORS["light"].get(color, self.LOG_COLORS["default"])
 
     def connect_api(self):
         email = self.entry_email.get().strip()
@@ -477,6 +598,8 @@ class BotFullApp(tk.Tk):
                 self.btn_disconnect.config(state="normal")
                 self.log_event(f"Conectado! Saldo: R$ {format_money(saldo)}", "#2DC937")
                 self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}")
+                # Notificação sonora ao conectar com sucesso
+                self.robot_sound("conexao")
             else:
                 self.connected = False
                 self.lbl_status.config(text="Desconectado", foreground="red")
@@ -498,6 +621,8 @@ class BotFullApp(tk.Tk):
         self.btn_connect.config(state="normal")
         self.btn_disconnect.config(state="disabled")
         self.lbl_saldo.config(text="Saldo: --")
+        self.lucro_acumulado_display = 0.0
+        self.update_lucro(self.lucro_acumulado_display)
         self.log_event("Desconectado da corretora.", "#FF4040")
 
     def toggle_theme(self):
@@ -507,8 +632,7 @@ class BotFullApp(tk.Tk):
         label = "Modo Escuro" if self.theme_mode == "dark" else "Modo Claro"
         self.btn_theme.config(text=f"{icon} {label}")
         bg = "#222" if self.theme_mode == "dark" else "#F5F6FA"
-        fg = "#FFD700" if self.theme_mode == "dark" else "#333"
-        self.text_log.config(bg=bg, fg=fg)
+        self.text_log.config(bg="#000000", fg="#FFD700")
         self.configure(bg=bg)
 
     def atualiza_ativos(self):
@@ -520,14 +644,13 @@ class BotFullApp(tk.Tk):
         self.update()
         try:
             ativos_all = self.api.get_all_open_time()
-            ativos = set()#        ALTERADO AQUI DE [] PARA set()
-            for tipo in ['turbo']:#        ALTERADO AQUI REMOVIDO 'binary'
+            ativos = set()
+            for tipo in ['turbo']:
                 for ativo, status_ativo in ativos_all[tipo].items():
                     if status_ativo['open']:
                         if tipo == "turbo" and (not self.var_otc.get() and '-OTC' in ativo):
                             continue
-                        ativos.add(ativo)#        ALTERADO  DE append PARA add
-
+                        ativos.add(ativo)
             self.ativos = sorted(ativos)
             self.update_ativos_list()
             self.log_event(f"Ativos atualizados ({len(self.ativos)} ativos abertos).", "#2DC937")
@@ -621,7 +744,8 @@ class BotFullApp(tk.Tk):
             stats_callback=self.update_stats,
             lucro_callback=self.update_lucro,
             stop_event=self.robot_stop,
-            direction_mode=self.direction_mode.get()
+            direction_mode=self.direction_mode.get(),
+            sound_callback=self.robot_sound
         )
         self.log_event("Robô iniciado! Aguardando próximo ciclo para operar...", "#2DC937")
         self.robot_thread = threading.Thread(target=self.robot.run, daemon=True)
@@ -642,11 +766,17 @@ class BotFullApp(tk.Tk):
         self.lbl_taxa.config(text=stats['taxa'])
 
     def update_lucro(self, valor):
+        self.lucro_acumulado_display = valor
         cor = "green" if valor >= 0 else "red"
         sinal = "" if valor >= 0 else "-"
         valor_abs = abs(valor)
         texto = f"R${sinal}{valor_abs:,.2f}".replace('.', ',')
         self.lbl_lucro.config(text=texto, foreground=cor)
+
+    def reset_lucro(self):
+        self.lucro_acumulado_display = 0.0
+        self.update_lucro(self.lucro_acumulado_display)
+        self.log_event("Lucro/Prejuízo zerado manualmente.", "#FFA500")
 
 if __name__ == "__main__":
     app = BotFullApp()
