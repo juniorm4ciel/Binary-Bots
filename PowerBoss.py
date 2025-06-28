@@ -6,6 +6,7 @@ import sv_ttk
 import time
 import os
 import json
+import sys
 
 # Caminhos padrão dos sons
 DEFAULT_SOUNDS = {
@@ -13,11 +14,18 @@ DEFAULT_SOUNDS = {
     "win":   "sounds/win.wav",
     "loss":  "sounds/loss.wav",
     "limit": "sounds/limit.wav",
-    "conexao": "sounds/conexao.wav"
+    "conexao": "sounds/conexao.wav",
+    "conexao_erro": "sounds/conexao_erro.wav"
 }
+
+def resource_path(relative_path):
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 def play_sound(sound_file=None, freq=None, dur=None):
     if sound_file:
+        sound_file = resource_path(sound_file)
         ext = os.path.splitext(sound_file)[1].lower()
         if ext == ".wav":
             try:
@@ -59,6 +67,7 @@ class IQOptionAPI:
         return status, reason
 
     def disconnect(self):
+        self.api = None
         self.connected = False
 
     def change_balance(self, tipo):
@@ -89,8 +98,39 @@ def get_direction(candle):
     else:
         return None
 
+def traduzir_erro(reason):
+    if isinstance(reason, dict):
+        code = reason.get("code", "")
+        message = reason.get("message", "")
+    else:
+        code = ""
+        message = str(reason)
+
+    if code == "invalid_credentials" or "wrong credentials" in message.lower():
+        return "Você digitou as credenciais erradas. Por favor, confira seu login e senha."
+    if code == "too_many_attempts" or "too many attempts" in message.lower():
+        return "Muitas tentativas de login. Aguarde alguns minutos antes de tentar novamente."
+    if code == "invalid_request" or "invalid request" in message.lower():
+        return "Requisição inválida. Tente novamente mais tarde."
+    if code == "invalid_login" or "invalid login" in message.lower():
+        return "Login inválido. Por favor, confira seu login."
+    if code == "banned":
+        return "Sua conta foi banida. Entre em contato com o suporte."
+    if code == "not_available" or "not available" in message.lower():
+        return "Serviço da corretora indisponível no momento. Tente novamente mais tarde."
+    if code == "timeout" or "timeout" in message.lower():
+        return "Tempo de conexão esgotado. Verifique sua internet e tente novamente."
+    if "network" in message.lower() or "connection" in message.lower():
+        return "Problema de conexão com a internet ou com a corretora."
+    if code == "account_blocked":
+        return "Sua conta está bloqueada. Entre em contato com o suporte da corretora."
+    if code == "account_not_activated":
+        return "Sua conta não está ativada. Ative a conta para continuar."
+    if message:
+        return f"Erro: {message}"
+    return "Ocorreu um erro desconhecido na corretora."
 class PowerBossRobot:
-    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", sound_callback=None):
+    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", sound_callback=None, finish_callback=None, update_saldo_callback=None):
         self.api = api
         self.config = config
         self.log = log_callback
@@ -102,6 +142,8 @@ class PowerBossRobot:
         self.entradas_realizadas = 0
         self.direction_mode = direction_mode
         self.sound_callback = sound_callback
+        self.finish_callback = finish_callback
+        self.update_saldo_callback = update_saldo_callback
 
     def get_candles(self, ativo, n=10, size=60):
         try:
@@ -122,6 +164,9 @@ class PowerBossRobot:
             while True:
                 status, lucro = self.api.check_win_v4(order_id)
                 if status is not None:
+                    # Atualiza saldo a cada operação finalizada (win/loss/empate)
+                    if self.update_saldo_callback:
+                        self.update_saldo_callback()
                     if status == 'win' or status is True:
                         if self.sound_callback:
                             self.sound_callback("win")
@@ -147,6 +192,8 @@ class PowerBossRobot:
         ativos = list(self.config['ativos'])
         if not ativos:
             self.log("Nenhum ativo selecionado!", "#FF4040")
+            if self.finish_callback:
+                self.finish_callback()
             return
 
         self.lucro_acumulado = 0.0
@@ -194,22 +241,18 @@ class PowerBossRobot:
                 while datetime.datetime.now().minute != alvo_minuto:
                     if self.stop_event.is_set():
                         self.log("Robô parado pelo usuário.", "#FFA500")
+                        if self.finish_callback:
+                            self.finish_callback()
                         return
                     time.sleep(0.5)
 
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                valor_entrada = 0
+                valor_entrada = valor_base  # <-- RESET VALOR ENTRADA NO INÍCIO DE CADA CICLO
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
-                    if mg_nivel == 0:
-                        if soros_ativo and soros_nivel > 0:
-                            valor_entrada = soros_valor
-                        else:
-                            valor_entrada = valor_base
-                    else:
-                        valor_entrada = valor_entrada * 2
-
+                    if mg_nivel > 0:
+                        valor_entrada *= 2
                     self.result_stats['ops'] += 1
                     self.entradas_realizadas += 1
                     self.stats_callback(self._stats())
@@ -253,13 +296,15 @@ class PowerBossRobot:
                 if self.verificar_condicoes_parada():
                     if self.sound_callback:
                         self.sound_callback("limit")
+                    if self.finish_callback:
+                        self.finish_callback()
                     return
                 time.sleep(3)
             else:
                 time.sleep(0.5)
         self.log("Robô finalizado pelo usuário.", "#FFA500")
-        if self.sound_callback:
-            self.sound_callback("limit")
+        if self.finish_callback:
+            self.finish_callback()
 
     def verificar_condicoes_parada(self):
         if not self.config['stop_lucro']:
@@ -283,7 +328,6 @@ class PowerBossRobot:
         losses = self.result_stats['losses']
         taxa = (wins / ops * 100) if ops else 0
         return {'ops': ops, 'wins': wins, 'losses': losses, 'taxa': f"{taxa:.1f}%"}
-
 def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="favor", use_adx=True):
     candles = api.get_candles(ativo, 60, minutos + (mg_niveis + 2) * 5)
     if not candles or len(candles) < (mg_niveis + 2) * 5:
@@ -328,7 +372,6 @@ def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="fav
         'assertividade': assertividade,
         'mg_niveis': mg_niveis
     }
-
 class BotFullApp(tk.Tk):
     LOG_COLORS = {
         "dark": {
@@ -372,10 +415,13 @@ class BotFullApp(tk.Tk):
             "entry": "",
             "win": "",
             "loss": "",
-            "limit": ""
+            "limit": "",
+            "conexao": "",
+            "conexao_erro": ""
         }
         self.load_sound_config()
         self.create_widgets()
+        self.load_login()
         self.after(1000, self.update_clock)
 
     def save_sound_config(self):
@@ -396,15 +442,39 @@ class BotFullApp(tk.Tk):
             except Exception:
                 pass
 
+    def save_login(self):
+        if self.var_save_login.get():
+            with open("login.json", "w") as f:
+                json.dump({
+                    "email": self.entry_email.get(),
+                    "senha": self.entry_senha.get()
+                }, f)
+        else:
+            if os.path.exists("login.json"):
+                os.remove("login.json")
+
+    def load_login(self):
+        if os.path.exists("login.json"):
+            try:
+                with open("login.json", "r") as f:
+                    data = json.load(f)
+                    self.entry_email.insert(0, data.get("email", ""))
+                    self.entry_senha.insert(0, data.get("senha", ""))
+                self.var_save_login.set(True)
+            except Exception:
+                pass
+
     def create_widgets(self):
         frame_conn = ttk.LabelFrame(self, text="Conexão")
         frame_conn.pack(fill="x", padx=10, pady=8)
         ttk.Label(frame_conn, text="Email:").grid(row=0, column=0, padx=6, pady=4, sticky="e")
         self.entry_email = ttk.Entry(frame_conn, width=29)
         self.entry_email.grid(row=0, column=1, padx=6, pady=4)
+        self.entry_email.bind("<Return>", lambda event: self.connect_api())
         ttk.Label(frame_conn, text="Senha:").grid(row=0, column=2, padx=6, pady=4, sticky="e")
         self.entry_senha = ttk.Entry(frame_conn, width=16, show="*")
         self.entry_senha.grid(row=0, column=3, padx=6, pady=4)
+        self.entry_senha.bind("<Return>", lambda event: self.connect_api())
         ttk.Label(frame_conn, text="Conta:").grid(row=0, column=4, padx=6, pady=4, sticky="e")
         self.combo_conta = ttk.Combobox(frame_conn, values=["PRACTICE", "REAL"], width=8, state="readonly")
         self.combo_conta.current(0)
@@ -415,10 +485,13 @@ class BotFullApp(tk.Tk):
         self.btn_disconnect.grid(row=0, column=7, padx=6, pady=4)
         self.lbl_status = ttk.Label(frame_conn, text="Desconectado", foreground="red")
         self.lbl_status.grid(row=0, column=8, padx=10, pady=4)
-        self.lbl_saldo = ttk.Label(frame_conn, text="Saldo: --")
+        self.lbl_saldo = tk.Label(frame_conn, text="Saldo: --", font=("Arial", 22, "bold"), fg="#00FF00", bg="#222")
         self.lbl_saldo.grid(row=0, column=9, padx=10, pady=4)
         self.btn_theme = ttk.Button(frame_conn, text="🌙 Modo Escuro", command=self.toggle_theme)
         self.btn_theme.grid(row=0, column=10, padx=10, pady=4)
+        self.var_save_login = tk.BooleanVar(value=False)
+        self.check_save_login = ttk.Checkbutton(frame_conn, text="Salvar credenciais", variable=self.var_save_login)
+        self.check_save_login.grid(row=1, column=1, columnspan=2, padx=6, pady=4, sticky="w")
 
         self.main = ttk.Frame(self)
         self.main.pack(fill="both", expand=True, padx=10, pady=5)
@@ -439,6 +512,8 @@ class BotFullApp(tk.Tk):
         btns_ativos.pack(pady=2)
         ttk.Button(btns_ativos, text="Atualizar Ativos", command=self.atualiza_ativos).pack(side="left", padx=3)
         ttk.Button(btns_ativos, text="Analisar Assertividade", command=self.catalogar_ativo).pack(side="left", padx=3)
+        self.lbl_clock = tk.Label(frame_ativos, text="", font=("Arial", 28, "bold"), fg="#FFD700", bg="#222")
+        self.lbl_clock.pack(pady=(12, 6))
 
         frame_config = ttk.LabelFrame(self.main, text="Configuração do Robô")
         frame_config.grid(row=0, column=1, sticky="nswe", padx=6, pady=4)
@@ -526,22 +601,85 @@ class BotFullApp(tk.Tk):
         self.text_log = tk.Text(log_and_btn_frame, height=11, state="disabled", bg="#000000", fg="#FFD700", font=("Consolas", 10))
         self.text_log.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
-        clockf = ttk.Frame(self)
-        clockf.pack(anchor="e", padx=14)
-        ttk.Label(clockf, text="Horário:").pack(side="left")
-        self.lbl_clock = ttk.Label(clockf, text="")
-        self.lbl_clock.pack(side="left")
+    def update_clock(self):
+        from datetime import datetime
+        self.lbl_clock.config(text=datetime.now().strftime("%H:%M:%S"))
+        self.after(1000, self.update_clock)
+    def toggle_theme(self):
+        self.theme_mode = "light" if self.theme_mode == "dark" else "dark"
+        set_azure_theme(self, self.theme_mode)
+        icon = "🌙" if self.theme_mode == "dark" else "☀️"
+        label = "Modo Escuro" if self.theme_mode == "dark" else "Modo Claro"
+        self.btn_theme.config(text=f"{icon} {label}")
+        bg = "#222" if self.theme_mode == "dark" else "#F5F6FA"
+        self.text_log.config(bg="#000000", fg="#FFD700")
+        self.configure(bg=bg)
+        if self.theme_mode == "dark":
+            self.lbl_clock.config(fg="#FFD700", bg="#222")
+            self.lbl_saldo.config(fg="#00FF00", bg="#222")
+        else:
+            self.lbl_clock.config(fg="#003366", bg="#F5F6FA")
+            self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
 
-    def clear_log(self):
-        self.text_log.config(state="normal")
-        self.text_log.delete(1.0, tk.END)
-        self.text_log.config(state="disabled")
+    def connect_api(self):
+        email = self.entry_email.get().strip()
+        senha = self.entry_senha.get().strip()
+        conta = self.combo_conta.get().upper()
+        if not email or not senha:
+            self.log_event("Preencha email e senha para conectar.", "#FF4040")
+            self.robot_sound("conexao_erro")
+            return
+        self.api = None
+        self.log_event("Tentando conectar à corretora...", "#00BFFF")
+        self.update()
+        try:
+            self.api = IQOptionAPI(email, senha)
+            status, reason = self.api.connect()
+            if status:
+                self.api.change_balance(conta)
+                saldo = self.api.get_balance()
+                self.connected = True
+                self.lbl_status.config(text="Conectado", foreground="#2DC937")
+                self.btn_connect.config(state="disabled")
+                self.btn_disconnect.config(state="normal")
+                self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}")
+                if self.theme_mode == "dark":
+                    self.lbl_saldo.config(fg="#00FF00", bg="#222")
+                else:
+                    self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
+                self.log_event(f"Conectado! Saldo: R$ {format_money(saldo)}", "#2DC937")
+                self.robot_sound("conexao")
+                self.save_login()
+            else:
+                self.connected = False
+                self.lbl_status.config(text="Desconectado", foreground="red")
+                msg = traduzir_erro(reason)
+                self.log_event(f"Erro ao conectar: {msg}", "#FF4040")
+                self.robot_sound("conexao_erro")
+        except Exception as e:
+            self.connected = False
+            self.lbl_status.config(text="Desconectado", foreground="red")
+            msg = traduzir_erro(str(e))
+            self.log_event(f"Erro ao conectar: {msg}", "#FF4040")
+            self.robot_sound("conexao_erro")
+
+    def disconnect_api(self):
+        if self.api:
+            self.api = None
+        self.connected = False
+        self.lbl_status.config(text="Desconectado", foreground="red")
+        self.btn_connect.config(state="normal")
+        self.btn_disconnect.config(state="disabled")
+        self.lbl_saldo.config(text="Saldo: --")
+        self.lucro_acumulado_display = 0.0
+        self.update_lucro(self.lucro_acumulado_display)
+        self.log_event("Desconectado da corretora.", "#FF4040")
 
     def robot_sound(self, event):
         file = self.sound_files.get(event)
         if not file:
             file = DEFAULT_SOUNDS.get(event)
-        if file and os.path.exists(file):
+        if file and os.path.exists(resource_path(file)):
             play_sound(sound_file=file)
         else:
             if event == "entry":
@@ -554,11 +692,9 @@ class BotFullApp(tk.Tk):
                 play_sound(freq=500, dur=180)
                 play_sound(freq=800, dur=220)
                 play_sound(freq=500, dur=180)
-
-    def update_clock(self):
-        from datetime import datetime
-        self.lbl_clock.config(text=datetime.now().strftime("%H:%M:%S"))
-        self.after(1000, self.update_clock)
+            elif event == "conexao_erro":
+                play_sound(freq=200, dur=500)
+                play_sound(freq=120, dur=350)
 
     def log_event(self, msg, color="#FFD700"):
         now = datetime.datetime.now().strftime('%H:%M:%S')
@@ -577,69 +713,14 @@ class BotFullApp(tk.Tk):
         else:
             return self.LOG_COLORS["light"].get(color, self.LOG_COLORS["default"])
 
-    def connect_api(self):
-        email = self.entry_email.get().strip()
-        senha = self.entry_senha.get().strip()
-        conta = self.combo_conta.get().upper()
-        if not email or not senha:
-            self.log_event("Preencha email e senha para conectar.", "#FF4040")
-            return
-        self.log_event("Tentando conectar à corretora...", "#00BFFF")
-        self.update()
-        try:
-            self.api = IQOptionAPI(email, senha)
-            status, reason = self.api.connect()
-            if status:
-                self.api.change_balance(conta)
-                saldo = self.api.get_balance()
-                self.connected = True
-                self.lbl_status.config(text="Conectado", foreground="#2DC937")
-                self.btn_connect.config(state="disabled")
-                self.btn_disconnect.config(state="normal")
-                self.log_event(f"Conectado! Saldo: R$ {format_money(saldo)}", "#2DC937")
-                self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}")
-                # Notificação sonora ao conectar com sucesso
-                self.robot_sound("conexao")
-            else:
-                self.connected = False
-                self.lbl_status.config(text="Desconectado", foreground="red")
-                self.log_event(f"Erro ao conectar: {reason}", "#FF4040")
-        except Exception as e:
-            self.connected = False
-            self.lbl_status.config(text="Desconectado", foreground="red")
-            self.log_event(f"Erro ao conectar: {str(e)}", "#FF4040")
-
-    def disconnect_api(self):
-        if self.api:
-            try:
-                self.api.disconnect()
-            except Exception:
-                pass
-        self.api = None
-        self.connected = False
-        self.lbl_status.config(text="Desconectado", foreground="red")
-        self.btn_connect.config(state="normal")
-        self.btn_disconnect.config(state="disabled")
-        self.lbl_saldo.config(text="Saldo: --")
-        self.lucro_acumulado_display = 0.0
-        self.update_lucro(self.lucro_acumulado_display)
-        self.log_event("Desconectado da corretora.", "#FF4040")
-
-    def toggle_theme(self):
-        self.theme_mode = "light" if self.theme_mode == "dark" else "dark"
-        set_azure_theme(self, self.theme_mode)
-        icon = "🌙" if self.theme_mode == "dark" else "☀️"
-        label = "Modo Escuro" if self.theme_mode == "dark" else "Modo Claro"
-        self.btn_theme.config(text=f"{icon} {label}")
-        bg = "#222" if self.theme_mode == "dark" else "#F5F6FA"
-        self.text_log.config(bg="#000000", fg="#FFD700")
-        self.configure(bg=bg)
-
+    def clear_log(self):
+        self.text_log.config(state="normal")
+        self.text_log.delete(1.0, tk.END)
+        self.text_log.config(state="disabled")
     def atualiza_ativos(self):
         if not self.api or not self.connected:
             self.log_event("Conecte-se para buscar ativos.", "#FF4040")
             return
-
         self.log_event("Buscando lista de ativos...", "#00BFFF")
         self.update()
         try:
@@ -655,7 +736,7 @@ class BotFullApp(tk.Tk):
             self.update_ativos_list()
             self.log_event(f"Ativos atualizados ({len(self.ativos)} ativos abertos).", "#2DC937")
         except Exception as e:
-            self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")            
+            self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")
 
     def update_ativos_list(self, filtrar=""):
         self.list_ativos.delete(0, tk.END)
@@ -704,6 +785,24 @@ class BotFullApp(tk.Tk):
             msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
             self.log_event(msg, "#FFD700")
 
+    def robot_finished(self):
+        self.lbl_robostatus.config(text="Parado", foreground="red")
+        self.btn_start.config(state="normal")
+        self.btn_stop.config(state="disabled")
+        self.log_event("Robô finalizado (limite atingido ou usuário parou).", "#FFA500")
+
+    def app_update_saldo(self):
+        if self.api and self.connected:
+            try:
+                saldo = self.api.get_balance()
+                self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}")
+                if self.theme_mode == "dark":
+                    self.lbl_saldo.config(fg="#00FF00", bg="#222")
+                else:
+                    self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
+            except Exception:
+                pass
+
     def start_robot(self):
         if self.robot_thread and self.robot_thread.is_alive():
             self.log_event("Já está rodando!", "#FF8000")
@@ -745,7 +844,9 @@ class BotFullApp(tk.Tk):
             lucro_callback=self.update_lucro,
             stop_event=self.robot_stop,
             direction_mode=self.direction_mode.get(),
-            sound_callback=self.robot_sound
+            sound_callback=self.robot_sound,
+            finish_callback=self.robot_finished,
+            update_saldo_callback=self.app_update_saldo
         )
         self.log_event("Robô iniciado! Aguardando próximo ciclo para operar...", "#2DC937")
         self.robot_thread = threading.Thread(target=self.robot.run, daemon=True)
