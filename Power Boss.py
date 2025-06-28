@@ -7,6 +7,7 @@ import time
 import os
 import json
 import sys
+import tkinter as tk
 
 DEFAULT_SOUNDS = {
     "entry": "sounds/entrada.wav",
@@ -128,6 +129,7 @@ def traduzir_erro(reason):
     if message:
         return f"Erro: {message}"
     return "Ocorreu um erro desconhecido na corretora."
+
 class PowerBossRobot:
     def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", sound_callback=None, finish_callback=None, update_saldo_callback=None):
         self.api = api
@@ -206,7 +208,7 @@ class PowerBossRobot:
         soros_valor = 0
         soros_nivel = 0
 
-        self.log("Robô Quadrante (segunda vela do quadrante) iniciado!", "#FFD700")
+        self.log("Robô Analisando! (aguardando segunda vela do quadrante) iniciado!", "#FFD700")
         while not self.stop_event.is_set():
             agora = datetime.datetime.now()
             if agora.minute % 5 == 0 and agora.second < 2:
@@ -370,6 +372,7 @@ def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="fav
         'assertividade': assertividade,
         'mg_niveis': mg_niveis
     }
+
 class BotFullApp(tk.Tk):
     LOG_COLORS = {
         "dark": {
@@ -395,7 +398,7 @@ class BotFullApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("Robô Power Boss - Tkinter Azure Full")
+        self.title("Robô Power Boss - By Junior Maciel")
         self.geometry("1050x720")
         self.resizable(True, True)
         self.theme_mode = "dark"
@@ -470,7 +473,7 @@ class BotFullApp(tk.Tk):
         self.list_ativos.pack(padx=5, pady=3, fill="y")
         btns_ativos = ttk.Frame(frame_ativos)
         btns_ativos.pack(pady=2)
-        ttk.Button(btns_ativos, text="Atualizar Ativos", command=self.atualiza_ativos).pack(side="left", padx=3)
+        ttk.Button(btns_ativos, text="Listar Ativos", command=self.atualiza_ativos).pack(side="left", padx=3)
         ttk.Button(btns_ativos, text="Analisar Assertividade", command=self.catalogar_ativo).pack(side="left", padx=3)
         self.lbl_clock = tk.Label(frame_ativos, text="", font=("Arial", 28, "bold"), fg="#FFD700", bg="#222")
         self.lbl_clock.pack(pady=(12, 6))
@@ -561,7 +564,58 @@ class BotFullApp(tk.Tk):
         self.text_log = tk.Text(log_and_btn_frame, height=11, state="disabled", bg="#000000", fg="#FFD700", font=("Consolas", 10))
         self.text_log.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
-    # (Os métodos utilitários e de controle continuam nas próximas partes)
+    # Métodos auxiliares para animação de ampulheta no log
+    def start_log_spinner(self, message_tag, base_message):
+        """Inicia uma animação de ampulheta no log com uma tag de identificação."""
+        self._log_spinner_running = True
+        self._log_spinner_state = 0
+        self._log_spinner_tag = message_tag
+        self._log_spinner_base = base_message
+        self._log_spinner_frames = ["⏳", "⌛"]
+        self._log_spinner_after_id = None
+
+        def update_spinner():
+            if not getattr(self, "_log_spinner_running", False):
+                return
+            spin = self._log_spinner_frames[self._log_spinner_state % len(self._log_spinner_frames)]
+            msg = f"{self._log_spinner_base} {spin}"
+            self.text_log.config(state="normal")
+            last_line_idx = self.text_log.index("end-2l linestart")
+            self.text_log.delete(last_line_idx, "end-1l lineend")
+            self.text_log.insert(last_line_idx, msg + "\n")
+            self.text_log.tag_add(self._log_spinner_tag, last_line_idx, f"{last_line_idx} lineend")
+            self.text_log.tag_config(self._log_spinner_tag, foreground="#FFA500")
+            self.text_log.config(state="disabled")
+            self.text_log.see("end")
+            self._log_spinner_state += 1
+            self._log_spinner_after_id = self.after(500, update_spinner)
+        # Insere a linha inicial
+        self.text_log.config(state="normal")
+        self.text_log.insert("end", f"{self._log_spinner_base} {self._log_spinner_frames[0]}\n")
+        last_line_idx = self.text_log.index("end-2l linestart")
+        self.text_log.tag_add(self._log_spinner_tag, last_line_idx, f"{last_line_idx} lineend")
+        self.text_log.tag_config(self._log_spinner_tag, foreground="#FFA500")
+        self.text_log.config(state="disabled")
+        self.text_log.see("end")
+        self._log_spinner_state = 1
+        update_spinner()
+
+    def stop_log_spinner(self, final_message, color="#FFD700"):
+        """Para a animação de ampulheta e substitui a linha pelo resultado final."""
+        self._log_spinner_running = False
+        if getattr(self, "_log_spinner_after_id", None):
+            self.after_cancel(self._log_spinner_after_id)
+            self._log_spinner_after_id = None
+        self.text_log.config(state="normal")
+        last_line_idx = self.text_log.index("end-2l linestart")
+        self.text_log.delete(last_line_idx, "end-1l lineend")
+        self.text_log.insert(last_line_idx, final_message + "\n")
+        tag_color = self.get_log_color(color)
+        self.text_log.tag_add("SPINNER_FINAL", last_line_idx, f"{last_line_idx} lineend")
+        self.text_log.tag_config("SPINNER_FINAL", foreground=tag_color)
+        self.text_log.config(state="disabled")
+        self.text_log.see("end")
+
     def save_login(self):
         if self.var_save_login.get():
             with open("login.json", "w") as f:
@@ -631,7 +685,6 @@ class BotFullApp(tk.Tk):
             self.lbl_clock.config(fg="#003366", bg="#F5F6FA")
             self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
 
-    # (Demais métodos de controle, log, robô, etc. continuam nas próximas partes)
     def connect_api(self):
         email = self.entry_email.get().strip()
         senha = self.entry_senha.get().strip()
@@ -751,8 +804,10 @@ class BotFullApp(tk.Tk):
         if not self.api or not self.connected:
             self.log_event("Conecte-se para buscar ativos.", "#FF4040")
             return
-        self.log_event("Listando ativos, aguarde!", "#00BFFF")
-        self.update()
+
+        # Inicia a animação da ampulheta no log
+        self.start_log_spinner("SPINNER_ATIVOS", "Listando ativos, aguarde!")
+
         def do_update():
             try:
                 ativos_all = self.api.get_all_open_time()
@@ -765,9 +820,10 @@ class BotFullApp(tk.Tk):
                             ativos.add(ativo)
                 self.ativos = sorted(ativos)
                 self.update_ativos_list()
-                self.log_event(f"Ativos atualizados ({len(self.ativos)} ativos abertos).", "#2DC937")
+                msg = f"Ativos atualizados ({len(self.ativos)} ativos abertos)."
+                self.after(0, lambda: self.stop_log_spinner(msg, "#2DC937"))
             except Exception as e:
-                self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")
+                self.after(0, lambda: self.stop_log_spinner(f"Erro ao buscar ativos: {e}", "#FF4040"))
         threading.Thread(target=do_update, daemon=True).start()
 
     def update_ativos_list(self, filtrar=""):
@@ -800,7 +856,10 @@ class BotFullApp(tk.Tk):
         else:
             ativos_analisar = self.ativos
         resultados = []
-        self.log_event("Analisando assertividade, aguarde!", "#FFA500")
+
+        # Inicia a animação da ampulheta no log
+        self.start_log_spinner("SPINNER_ASSERT", "Analisando assertividade, aguarde!")
+
         def do_catalog():
             for ativo in ativos_analisar:
                 try:
@@ -810,14 +869,24 @@ class BotFullApp(tk.Tk):
                 except Exception:
                     pass
             if not resultados:
-                self.log_event("Nenhum ativo pôde ser analisado.", "#FF4040")
+                self.after(0, lambda: self.stop_log_spinner("Nenhum ativo pôde ser analisado.", "#FF4040"))
                 return
             melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)[:3]
+            msg_final = []
             for r in melhores:
                 wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
                 msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
-                self.log_event(msg, "#FFD700")
+                msg_final.append(msg)
+            # Exibe só a primeira linha como resultado principal
+            if msg_final:
+                self.after(0, lambda: self.stop_log_spinner(msg_final[0], "#FFD700"))
+            else:
+                self.after(0, lambda: self.stop_log_spinner("Nenhum resultado disponível.", "#FF4040"))
+            # As demais, se houver, insere normalmente depois
+            for extra_msg in msg_final[1:]:
+                self.after(0, lambda m=extra_msg: self.log_event(m, "#FFD700"))
         threading.Thread(target=do_catalog, daemon=True).start()
+
     def robot_finished(self):
         self.lbl_robostatus.config(text="Parado", foreground="red")
         self.btn_start.config(state="normal")
