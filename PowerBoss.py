@@ -8,7 +8,6 @@ import os
 import json
 import sys
 
-# Caminhos padrão dos sons
 DEFAULT_SOUNDS = {
     "entry": "sounds/entrada.wav",
     "win":   "sounds/win.wav",
@@ -156,15 +155,14 @@ class PowerBossRobot:
             self.sound_callback("entry")
         try:
             _, order_id = self.api.buy(valor, ativo, direcao, exp)
-            if not id:
-                self.log("Falha ao enviar ordem para {}.".format(ativo), "#FF4040")
+            if not order_id:
+                self.log(f"Falha ao enviar ordem para {ativo}.", "#FF4040")
                 return None, 0.0
             max_wait = 120
             start = time.time()
             while True:
                 status, lucro = self.api.check_win_v4(order_id)
                 if status is not None:
-                    # Atualiza saldo a cada operação finalizada (win/loss/empate)
                     if self.update_saldo_callback:
                         self.update_saldo_callback()
                     if status == 'win' or status is True:
@@ -195,7 +193,6 @@ class PowerBossRobot:
             if self.finish_callback:
                 self.finish_callback()
             return
-
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
         self.result_stats = {'ops': 0, 'wins': 0, 'losses': 0}
@@ -248,7 +245,7 @@ class PowerBossRobot:
 
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                valor_entrada = valor_base  # <-- RESET VALOR ENTRADA NO INÍCIO DE CADA CICLO
+                valor_entrada = valor_base
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
                     if mg_nivel > 0:
@@ -328,6 +325,7 @@ class PowerBossRobot:
         losses = self.result_stats['losses']
         taxa = (wins / ops * 100) if ops else 0
         return {'ops': ops, 'wins': wins, 'losses': losses, 'taxa': f"{taxa:.1f}%"}
+
 def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="favor", use_adx=True):
     candles = api.get_candles(ativo, 60, minutos + (mg_niveis + 2) * 5)
     if not candles or len(candles) < (mg_niveis + 2) * 5:
@@ -410,6 +408,7 @@ class BotFullApp(tk.Tk):
         self.ativos = []
         self.direction_mode = tk.StringVar(value="favor")
         self.lucro_acumulado_display = 0.0
+        self.robot_stopped_manual = False
 
         self.sound_files = {
             "entry": "",
@@ -420,49 +419,10 @@ class BotFullApp(tk.Tk):
             "conexao_erro": ""
         }
         self.load_sound_config()
+        self.spinner_running = False
         self.create_widgets()
         self.load_login()
         self.after(1000, self.update_clock)
-
-    def save_sound_config(self):
-        try:
-            with open("sons.json", "w") as f:
-                json.dump(self.sound_files, f)
-        except Exception:
-            pass
-
-    def load_sound_config(self):
-        if os.path.exists("sons.json"):
-            try:
-                with open("sons.json", "r") as f:
-                    arquivos = json.load(f)
-                    for k in self.sound_files:
-                        if k in arquivos:
-                            self.sound_files[k] = arquivos[k]
-            except Exception:
-                pass
-
-    def save_login(self):
-        if self.var_save_login.get():
-            with open("login.json", "w") as f:
-                json.dump({
-                    "email": self.entry_email.get(),
-                    "senha": self.entry_senha.get()
-                }, f)
-        else:
-            if os.path.exists("login.json"):
-                os.remove("login.json")
-
-    def load_login(self):
-        if os.path.exists("login.json"):
-            try:
-                with open("login.json", "r") as f:
-                    data = json.load(f)
-                    self.entry_email.insert(0, data.get("email", ""))
-                    self.entry_senha.insert(0, data.get("senha", ""))
-                self.var_save_login.set(True)
-            except Exception:
-                pass
 
     def create_widgets(self):
         frame_conn = ttk.LabelFrame(self, text="Conexão")
@@ -601,10 +561,60 @@ class BotFullApp(tk.Tk):
         self.text_log = tk.Text(log_and_btn_frame, height=11, state="disabled", bg="#000000", fg="#FFD700", font=("Consolas", 10))
         self.text_log.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
+    # (Os métodos utilitários e de controle continuam nas próximas partes)
+    def save_login(self):
+        if self.var_save_login.get():
+            with open("login.json", "w") as f:
+                json.dump({
+                    "email": self.entry_email.get(),
+                    "senha": self.entry_senha.get()
+                }, f)
+        else:
+            if os.path.exists("login.json"):
+                os.remove("login.json")
+
+    def load_login(self):
+        if os.path.exists("login.json"):
+            try:
+                with open("login.json", "r") as f:
+                    data = json.load(f)
+                    self.entry_email.delete(0, tk.END)
+                    self.entry_email.insert(0, data.get("email", ""))
+                    self.entry_senha.delete(0, tk.END)
+                    self.entry_senha.insert(0, data.get("senha", ""))
+                self.var_save_login.set(True)
+            except Exception:
+                self.entry_email.delete(0, tk.END)
+                self.entry_senha.delete(0, tk.END)
+                self.var_save_login.set(False)
+        else:
+            self.entry_email.delete(0, tk.END)
+            self.entry_senha.delete(0, tk.END)
+            self.var_save_login.set(False)
+
+    def save_sound_config(self):
+        try:
+            with open("sons.json", "w") as f:
+                json.dump(self.sound_files, f)
+        except Exception:
+            pass
+
+    def load_sound_config(self):
+        if os.path.exists("sons.json"):
+            try:
+                with open("sons.json", "r") as f:
+                    arquivos = json.load(f)
+                    for k in self.sound_files:
+                        if k in arquivos:
+                            self.sound_files[k] = arquivos[k]
+            except Exception:
+                pass
+
     def update_clock(self):
         from datetime import datetime
         self.lbl_clock.config(text=datetime.now().strftime("%H:%M:%S"))
         self.after(1000, self.update_clock)
+
     def toggle_theme(self):
         self.theme_mode = "light" if self.theme_mode == "dark" else "dark"
         set_azure_theme(self, self.theme_mode)
@@ -621,15 +631,21 @@ class BotFullApp(tk.Tk):
             self.lbl_clock.config(fg="#003366", bg="#F5F6FA")
             self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
 
+    # (Demais métodos de controle, log, robô, etc. continuam nas próximas partes)
     def connect_api(self):
         email = self.entry_email.get().strip()
         senha = self.entry_senha.get().strip()
         conta = self.combo_conta.get().upper()
+        self.api = None
+        self.connected = False
+        self.lbl_status.config(text="Desconectado", foreground="red")
+        self.btn_connect.config(state="normal")
+        self.btn_disconnect.config(state="disabled")
+        self.lbl_saldo.config(text="Saldo: --")
         if not email or not senha:
             self.log_event("Preencha email e senha para conectar.", "#FF4040")
             self.robot_sound("conexao_erro")
             return
-        self.api = None
         self.log_event("Tentando conectar à corretora...", "#00BFFF")
         self.update()
         try:
@@ -651,20 +667,32 @@ class BotFullApp(tk.Tk):
                 self.robot_sound("conexao")
                 self.save_login()
             else:
+                self.api = None
                 self.connected = False
                 self.lbl_status.config(text="Desconectado", foreground="red")
+                self.btn_connect.config(state="normal")
+                self.btn_disconnect.config(state="disabled")
+                self.lbl_saldo.config(text="Saldo: --")
                 msg = traduzir_erro(reason)
                 self.log_event(f"Erro ao conectar: {msg}", "#FF4040")
                 self.robot_sound("conexao_erro")
         except Exception as e:
+            self.api = None
             self.connected = False
             self.lbl_status.config(text="Desconectado", foreground="red")
+            self.btn_connect.config(state="normal")
+            self.btn_disconnect.config(state="disabled")
+            self.lbl_saldo.config(text="Saldo: --")
             msg = traduzir_erro(str(e))
             self.log_event(f"Erro ao conectar: {msg}", "#FF4040")
             self.robot_sound("conexao_erro")
 
     def disconnect_api(self):
         if self.api:
+            try:
+                self.api.disconnect()
+            except Exception:
+                pass
             self.api = None
         self.connected = False
         self.lbl_status.config(text="Desconectado", foreground="red")
@@ -674,6 +702,7 @@ class BotFullApp(tk.Tk):
         self.lucro_acumulado_display = 0.0
         self.update_lucro(self.lucro_acumulado_display)
         self.log_event("Desconectado da corretora.", "#FF4040")
+        self.save_login()
 
     def robot_sound(self, event):
         file = self.sound_files.get(event)
@@ -717,26 +746,29 @@ class BotFullApp(tk.Tk):
         self.text_log.config(state="normal")
         self.text_log.delete(1.0, tk.END)
         self.text_log.config(state="disabled")
+
     def atualiza_ativos(self):
         if not self.api or not self.connected:
             self.log_event("Conecte-se para buscar ativos.", "#FF4040")
             return
-        self.log_event("Buscando lista de ativos...", "#00BFFF")
+        self.log_event("Listando ativos, aguarde!", "#00BFFF")
         self.update()
-        try:
-            ativos_all = self.api.get_all_open_time()
-            ativos = set()
-            for tipo in ['turbo']:
-                for ativo, status_ativo in ativos_all[tipo].items():
-                    if status_ativo['open']:
-                        if tipo == "turbo" and (not self.var_otc.get() and '-OTC' in ativo):
-                            continue
-                        ativos.add(ativo)
-            self.ativos = sorted(ativos)
-            self.update_ativos_list()
-            self.log_event(f"Ativos atualizados ({len(self.ativos)} ativos abertos).", "#2DC937")
-        except Exception as e:
-            self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")
+        def do_update():
+            try:
+                ativos_all = self.api.get_all_open_time()
+                ativos = set()
+                for tipo in ['turbo']:
+                    for ativo, status_ativo in ativos_all[tipo].items():
+                        if status_ativo['open']:
+                            if tipo == "turbo" and (not self.var_otc.get() and '-OTC' in ativo):
+                                continue
+                            ativos.add(ativo)
+                self.ativos = sorted(ativos)
+                self.update_ativos_list()
+                self.log_event(f"Ativos atualizados ({len(self.ativos)} ativos abertos).", "#2DC937")
+            except Exception as e:
+                self.log_event(f"Erro ao buscar ativos: {e}", "#FF4040")
+        threading.Thread(target=do_update, daemon=True).start()
 
     def update_ativos_list(self, filtrar=""):
         self.list_ativos.delete(0, tk.END)
@@ -757,7 +789,7 @@ class BotFullApp(tk.Tk):
             self.log_event("Conecte-se para analisar assertividade.", "#FF4040")
             return
         selecionados = self.get_selected_ativos()
-        use_adx = self.var_adx.get()
+        use_adx = getattr(self, "var_adx", tk.BooleanVar(value=True)).get()
         try:
             mg_niveis = int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1
         except Exception:
@@ -768,28 +800,31 @@ class BotFullApp(tk.Tk):
         else:
             ativos_analisar = self.ativos
         resultados = []
-        self.log_event("Analisando assertividade dos ativos...", "#FFA500")
-        for ativo in ativos_analisar:
-            try:
-                res = catalogar_powerboss(self.api, ativo, minutos=50, mg_niveis=mg_niveis, direction_mode=direction_mode, use_adx=use_adx)
-                if res:
-                    resultados.append(res)
-            except Exception as e:
-                self.log_event(f"Erro ao catalogar {ativo}: {e}", "#FF4040")
-        if not resultados:
-            self.log_event("Nenhum ativo pôde ser analisado.", "#FF4040")
-            return
-        melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)[:3]
-        for r in melhores:
-            wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
-            msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
-            self.log_event(msg, "#FFD700")
-
+        self.log_event("Analisando assertividade, aguarde!", "#FFA500")
+        def do_catalog():
+            for ativo in ativos_analisar:
+                try:
+                    res = catalogar_powerboss(self.api, ativo, minutos=50, mg_niveis=mg_niveis, direction_mode=direction_mode, use_adx=use_adx)
+                    if res:
+                        resultados.append(res)
+                except Exception:
+                    pass
+            if not resultados:
+                self.log_event("Nenhum ativo pôde ser analisado.", "#FF4040")
+                return
+            melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)[:3]
+            for r in melhores:
+                wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
+                msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
+                self.log_event(msg, "#FFD700")
+        threading.Thread(target=do_catalog, daemon=True).start()
     def robot_finished(self):
         self.lbl_robostatus.config(text="Parado", foreground="red")
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
-        self.log_event("Robô finalizado (limite atingido ou usuário parou).", "#FFA500")
+        if not self.robot_stopped_manual:
+            self.log_event("Robô finalizado (limite atingido ou usuário parou).", "#FFA500")
+        self.robot_stopped_manual = False
 
     def app_update_saldo(self):
         if self.api and self.connected:
@@ -820,11 +855,11 @@ class BotFullApp(tk.Tk):
                 "expiracao": int(self.combo_exp.get()),
                 "entradas": int(self.spin_entradas.get()),
                 "soros": int(self.spin_soros.get()),
-                "otc": self.var_otc.get(),
-                "martingale": self.var_martingale.get(),
+                "otc": getattr(self, "var_otc", tk.BooleanVar(value=True)).get(),
+                "martingale": getattr(self, "var_martingale", tk.BooleanVar(value=True)).get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
-                "adx": self.var_adx.get(),
-                "stop_lucro": self.var_stop.get(),
+                "adx": getattr(self, "var_adx", tk.BooleanVar(value=True)).get(),
+                "stop_lucro": getattr(self, "var_stop", tk.BooleanVar(value=False)).get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
                 "perda": float(self.entry_stoploss.get().replace(",", ".")) if self.entry_stoploss.get() else 0.0,
                 "ativos": ativos
@@ -833,6 +868,7 @@ class BotFullApp(tk.Tk):
             self.log_event("Preencha corretamente as configurações.", "#FF4040")
             return
         self.robot_stop.clear()
+        self.robot_stopped_manual = False
         self.lbl_robostatus.config(text="Operando", foreground="#FFB000")
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
@@ -855,6 +891,7 @@ class BotFullApp(tk.Tk):
     def stop_robot(self):
         if self.robot_stop:
             self.robot_stop.set()
+        self.robot_stopped_manual = True
         self.lbl_robostatus.config(text="Parado", foreground="red")
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
