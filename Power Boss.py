@@ -205,8 +205,7 @@ class PowerBossRobot:
 
         soros_percent = self.config.get('soros', 0)
         soros_ativo = soros_percent > 0
-        soros_valor = 0
-        soros_nivel = 0
+        prox_soros = None  # valor da próxima entrada se ativar soros
 
         self.log("Robô Analisando! (aguardando segunda vela do quadrante) iniciado!", "#FFD700")
         while not self.stop_event.is_set():
@@ -247,7 +246,12 @@ class PowerBossRobot:
 
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                valor_entrada = valor_base
+                # Aplica Soros se estiver ativado e houver valor para próxima entrada
+                if soros_ativo and prox_soros is not None:
+                    valor_entrada = prox_soros
+                    prox_soros = None
+                else:
+                    valor_entrada = valor_base
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
                     if mg_nivel > 0:
@@ -264,17 +268,16 @@ class PowerBossRobot:
                     if resultado is None and lucro_op == 0.0:
                         self.log(f"EMPATE (doji) em {ativo} | Valor devolvido.", "#FFD700")
                         self.stats_callback(self._stats())
+                        prox_soros = None  # Não ativa Soros se empate
                         break
                     elif resultado is True:
                         self.result_stats['wins'] += 1
                         self.log(f"WIN no {ativo} com {direcao_entrada.upper()} {labelmg} | Lucro: {lucro_op:.2f}", "#2DC937")
-                        if soros_ativo:
-                            if mg_nivel == 0:
-                                soros_nivel += 1
-                                soros_valor = valor_entrada + (lucro_op * (soros_percent / 100))
-                            else:
-                                soros_nivel = 0
-                                soros_valor = 0
+                        # SÓ ativa Soros se não foi MG e percentual > 0
+                        if soros_ativo and mg_nivel == 0:
+                            prox_soros = valor_base + (lucro_op * (soros_percent / 100))
+                        else:
+                            prox_soros = None
                         self.stats_callback(self._stats())
                         break
                     else:
@@ -286,9 +289,7 @@ class PowerBossRobot:
                         else:
                             self.result_stats['losses'] += 1
                             self.log(f"LOSS no {ativo} com {direcao_entrada.upper()} {labelmg} | Perda: {lucro_op:.2f}", "#FF4040")
-                            if soros_ativo:
-                                soros_nivel = 0
-                                soros_valor = 0
+                            prox_soros = None  # Perdeu, não faz Soros na próxima
                             self.stats_callback(self._stats())
                             break
 
@@ -550,7 +551,7 @@ class BotFullApp(tk.Tk):
         self.lbl_taxa.grid(row=0, column=7)
         frame_lucro = ttk.LabelFrame(self.main, text="Lucro/Prejuízo Atual")
         frame_lucro.grid(row=0, column=2, sticky="nswe", padx=6, pady=4)
-        self.lbl_lucro = ttk.Label(frame_lucro, text="R$ 0,00", font=("Arial", 22, "bold"), foreground="green")
+        self.lbl_lucro = ttk.Label(frame_lucro, text="R$ 0,00", font=("Arial", 22, "bold"), foreground="#2DC937")
         self.lbl_lucro.pack(side="left", padx=3, pady=6)
         self.btn_lucro_reset = ttk.Button(frame_lucro, text="🔄 Reset", command=self.reset_lucro)
         self.btn_lucro_reset.pack(side="left", padx=8, pady=6)
@@ -598,6 +599,7 @@ class BotFullApp(tk.Tk):
         self.text_log.config(state="disabled")
         self.text_log.see("end")
         self._log_spinner_state = 1
+        self.text_log.update_idletasks()  # Força update imediato para a mensagem aparecer já
         update_spinner()
 
     def stop_log_spinner(self, final_message, color="#FFD700"):
@@ -680,11 +682,11 @@ class BotFullApp(tk.Tk):
         self.configure(bg=bg)
         if self.theme_mode == "dark":
             self.lbl_clock.config(fg="#FFD700", bg="#222")
-            self.lbl_saldo.config(fg="#00FF00", bg="#222")
+            self.lbl_saldo.config(fg="#00FF00", bg="#222")            
         else:
             self.lbl_clock.config(fg="#003366", bg="#F5F6FA")
             self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
-
+            
     def connect_api(self):
         email = self.entry_email.get().strip()
         senha = self.entry_senha.get().strip()
@@ -807,6 +809,7 @@ class BotFullApp(tk.Tk):
 
         # Inicia a animação da ampulheta no log
         self.start_log_spinner("SPINNER_ATIVOS", "Listando ativos, aguarde!")
+        self.text_log.update_idletasks()  # Força update imediato
 
         def do_update():
             try:
