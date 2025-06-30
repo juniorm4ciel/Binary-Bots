@@ -7,7 +7,6 @@ import time
 import os
 import json
 import sys
-import tkinter as tk
 
 DEFAULT_SOUNDS = {
     "entry": "sounds/entrada.wav",
@@ -422,6 +421,8 @@ class BotFullApp(tk.Tk):
             "conexao": "",
             "conexao_erro": ""
         }
+        self.sons_ativos = tk.BooleanVar(value=True)  # NOVO: controla se o som está ativo ou não
+
         self.load_sound_config()
         self.spinner_running = False
         self.create_widgets()
@@ -456,6 +457,9 @@ class BotFullApp(tk.Tk):
         self.var_save_login = tk.BooleanVar(value=False)
         self.check_save_login = ttk.Checkbutton(frame_conn, text="Salvar credenciais", variable=self.var_save_login)
         self.check_save_login.grid(row=1, column=1, columnspan=2, padx=6, pady=4, sticky="w")
+        # NOVO: Botão para ativar/desativar sons
+        self.check_sons = ttk.Checkbutton(frame_conn, text="Sons ativados", variable=self.sons_ativos, command=self.update_check_sons_label)
+        self.check_sons.grid(row=1, column=3, padx=8, pady=4, sticky="w")
 
         self.main = ttk.Frame(self)
         self.main.pack(fill="both", expand=True, padx=10, pady=5)
@@ -565,9 +569,14 @@ class BotFullApp(tk.Tk):
         self.text_log = tk.Text(log_and_btn_frame, height=11, state="disabled", bg="#000000", fg="#FFD700", font=("Consolas", 10))
         self.text_log.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
+    def update_check_sons_label(self):
+        if self.sons_ativos.get():
+            self.check_sons.config(text="Sons ativados")
+        else:
+            self.check_sons.config(text="Sons desativados")
+
     # Métodos auxiliares para animação de ampulheta no log
     def start_log_spinner(self, message_tag, base_message):
-        """Inicia uma animação de ampulheta no log com uma tag de identificação."""
         self._log_spinner_running = True
         self._log_spinner_state = 0
         self._log_spinner_tag = message_tag
@@ -590,7 +599,6 @@ class BotFullApp(tk.Tk):
             self.text_log.see("end")
             self._log_spinner_state += 1
             self._log_spinner_after_id = self.after(500, update_spinner)
-        # Insere a linha inicial
         self.text_log.config(state="normal")
         self.text_log.insert("end", f"{self._log_spinner_base} {self._log_spinner_frames[0]}\n")
         last_line_idx = self.text_log.index("end-2l linestart")
@@ -599,11 +607,10 @@ class BotFullApp(tk.Tk):
         self.text_log.config(state="disabled")
         self.text_log.see("end")
         self._log_spinner_state = 1
-        self.text_log.update_idletasks()  # Força update imediato para a mensagem aparecer já
+        self.text_log.update_idletasks()
         update_spinner()
 
     def stop_log_spinner(self, final_message, color="#FFD700"):
-        """Para a animação de ampulheta e substitui a linha pelo resultado final."""
         self._log_spinner_running = False
         if getattr(self, "_log_spinner_after_id", None):
             self.after_cancel(self._log_spinner_after_id)
@@ -682,11 +689,12 @@ class BotFullApp(tk.Tk):
         self.configure(bg=bg)
         if self.theme_mode == "dark":
             self.lbl_clock.config(fg="#FFD700", bg="#222")
-            self.lbl_saldo.config(fg="#00FF00", bg="#222")            
+            self.lbl_saldo.config(fg="#00FF00" if self.lucro_acumulado_display >= 0 else "#FF4040", bg="#222")
         else:
             self.lbl_clock.config(fg="#003366", bg="#F5F6FA")
-            self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
-            
+            self.lbl_saldo.config(fg="#006400" if self.lucro_acumulado_display >= 0 else "#FF4040", bg="#F5F6FA")
+        self.update_lucro(self.lucro_acumulado_display)
+
     def connect_api(self):
         email = self.entry_email.get().strip()
         senha = self.entry_senha.get().strip()
@@ -760,6 +768,8 @@ class BotFullApp(tk.Tk):
         self.save_login()
 
     def robot_sound(self, event):
+        if not self.sons_ativos.get():
+            return
         file = self.sound_files.get(event)
         if not file:
             file = DEFAULT_SOUNDS.get(event)
@@ -806,11 +816,8 @@ class BotFullApp(tk.Tk):
         if not self.api or not self.connected:
             self.log_event("Conecte-se para buscar ativos.", "#FF4040")
             return
-
-        # Inicia a animação da ampulheta no log
         self.start_log_spinner("SPINNER_ATIVOS", "Listando ativos, aguarde!")
-        self.text_log.update_idletasks()  # Força update imediato
-
+        self.text_log.update_idletasks()
         def do_update():
             try:
                 ativos_all = self.api.get_all_open_time()
@@ -859,10 +866,7 @@ class BotFullApp(tk.Tk):
         else:
             ativos_analisar = self.ativos
         resultados = []
-
-        # Inicia a animação da ampulheta no log
         self.start_log_spinner("SPINNER_ASSERT", "Analisando assertividade, aguarde!")
-
         def do_catalog():
             for ativo in ativos_analisar:
                 try:
@@ -880,12 +884,10 @@ class BotFullApp(tk.Tk):
                 wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
                 msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
                 msg_final.append(msg)
-            # Exibe só a primeira linha como resultado principal
             if msg_final:
                 self.after(0, lambda: self.stop_log_spinner(msg_final[0], "#FFD700"))
             else:
                 self.after(0, lambda: self.stop_log_spinner("Nenhum resultado disponível.", "#FF4040"))
-            # As demais, se houver, insere normalmente depois
             for extra_msg in msg_final[1:]:
                 self.after(0, lambda m=extra_msg: self.log_event(m, "#FFD700"))
         threading.Thread(target=do_catalog, daemon=True).start()
@@ -902,11 +904,11 @@ class BotFullApp(tk.Tk):
         if self.api and self.connected:
             try:
                 saldo = self.api.get_balance()
-                self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}")
-                if self.theme_mode == "dark":
-                    self.lbl_saldo.config(fg="#00FF00", bg="#222")
+                if saldo < 0:
+                    fg = "#FF4040"
                 else:
-                    self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
+                    fg = "#00FF00" if self.theme_mode == "dark" else "#006400"
+                self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}", fg=fg, bg="#222" if self.theme_mode == "dark" else "#F5F6FA")
             except Exception:
                 pass
 
@@ -977,7 +979,10 @@ class BotFullApp(tk.Tk):
 
     def update_lucro(self, valor):
         self.lucro_acumulado_display = valor
-        cor = "green" if valor >= 0 else "red"
+        if valor < 0:
+            cor = "#FF4040"
+        else:
+            cor = "#00FF00" if self.theme_mode == "dark" else "#006400"
         sinal = "" if valor >= 0 else "-"
         valor_abs = abs(valor)
         texto = f"R${sinal}{valor_abs:,.2f}".replace('.', ',')
