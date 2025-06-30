@@ -89,6 +89,50 @@ class IQOptionAPI:
     def check_win_v4(self, order_id):
         return self.api.check_win_v4(order_id)
 
+    # Função para pegar ADX das velas (helper)
+    def get_adx(self, ativo, period=14, size=60):
+        """
+        Calcula o ADX dos candles recentes do ativo.
+        Retorna o valor do ADX da última vela completa (exclui a vela atual em formação).
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            return None
+        n_candles = period + 2
+        candles = self.get_candles(ativo, size, n_candles)
+        if len(candles) < period + 1:
+            return None
+        closes = np.array([c['close'] for c in candles])
+        highs = np.array([c['max'] for c in candles])
+        lows = np.array([c['min'] for c in candles])
+
+        plus_dm = highs[1:] - highs[:-1]
+        minus_dm = lows[:-1] - lows[1:]
+        plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+        minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+        tr = np.maximum.reduce([
+            highs[1:] - lows[1:],
+            np.abs(highs[1:] - closes[:-1]),
+            np.abs(lows[1:] - closes[:-1])
+        ])
+
+        period = min(period, len(tr))
+        atr = np.zeros_like(tr)
+        atr[0] = tr[:period].mean()
+        for i in range(1, len(tr)):
+            atr[i] = (atr[i-1]*(period-1) + tr[i])/period
+
+        plus_di = 100 * (plus_dm/atr)
+        minus_di = 100 * (minus_dm/atr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
+        adx = np.zeros_like(dx)
+        adx[0] = dx[:period].mean()
+        for i in range(1, len(dx)):
+            adx[i] = (adx[i-1]*(period-1) + dx[i])/period
+        # Retornar o ADX da última vela fechada (ignorar vela em formação)
+        return float(adx[-2]) if len(adx) >= 2 else float(adx[-1])
+
 def get_direction(candle):
     if candle['close'] > candle['open']:
         return 'call'
@@ -213,6 +257,21 @@ class PowerBossRobot:
                 ativo = ativos[ativo_idx % len(ativos)]
                 ativo_idx += 1
                 self.log(f"[QUADRANTE NOVO] Minuto {agora.minute:02d} - Ativo: {ativo}", "#FFD700")
+
+                # BLOQUEIO ADX: Só opera se ADX < 21, se ativado em config
+                use_adx = self.config.get("adx", False)
+                adx_val = None
+                if use_adx:
+                    adx_val = self.api.get_adx(ativo, period=14, size=60)
+                    if adx_val is not None and adx_val >= 21:
+                        self.log(f"Entrada BLOQUEADA pelo ADX! ADX atual = {adx_val:.2f} (maior ou igual a 21)", "#FFA500")
+                        # Espera até o próximo quadrante para tentar de novo
+                        while True:
+                            now = datetime.datetime.now()
+                            if now.minute % 5 != 0 or now.second > 2 or self.stop_event.is_set():
+                                break
+                            time.sleep(1)
+                        continue
 
                 candles = self.get_candles(ativo, n=2, size=60)
                 if len(candles) < 2:
