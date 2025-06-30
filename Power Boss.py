@@ -91,10 +91,6 @@ class IQOptionAPI:
 
     # Função para pegar ADX das velas (helper)
     def get_adx(self, ativo, period=14, size=60):
-        """
-        Calcula o ADX dos candles recentes do ativo.
-        Retorna o valor do ADX da última vela completa (exclui a vela atual em formação).
-        """
         try:
             import numpy as np
         except ImportError:
@@ -103,10 +99,15 @@ class IQOptionAPI:
         candles = self.get_candles(ativo, size, n_candles)
         if len(candles) < period + 1:
             return None
-        closes = np.array([c['close'] for c in candles])
-        highs = np.array([c['max'] for c in candles])
-        lows = np.array([c['min'] for c in candles])
-
+        closes = [c['close'] for c in candles]
+        highs = [c['max'] for c in candles]
+        lows = [c['min'] for c in candles]
+        closes = list(closes)
+        highs = list(highs)
+        lows = list(lows)
+        closes = np.array(closes)
+        highs = np.array(highs)
+        lows = np.array(lows)
         plus_dm = highs[1:] - highs[:-1]
         minus_dm = lows[:-1] - lows[1:]
         plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
@@ -116,13 +117,11 @@ class IQOptionAPI:
             np.abs(highs[1:] - closes[:-1]),
             np.abs(lows[1:] - closes[:-1])
         ])
-
         period = min(period, len(tr))
         atr = np.zeros_like(tr)
         atr[0] = tr[:period].mean()
         for i in range(1, len(tr)):
             atr[i] = (atr[i-1]*(period-1) + tr[i])/period
-
         plus_di = 100 * (plus_dm/atr)
         minus_di = 100 * (minus_dm/atr)
         dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
@@ -265,7 +264,6 @@ class PowerBossRobot:
                     adx_val = self.api.get_adx(ativo, period=14, size=60)
                     if adx_val is not None and adx_val >= 21:
                         self.log(f"Entrada BLOQUEADA pelo ADX! ADX atual = {adx_val:.2f} (maior ou igual a 21)", "#FFA500")
-                        # Espera até o próximo quadrante para tentar de novo
                         while True:
                             now = datetime.datetime.now()
                             if now.minute % 5 != 0 or now.second > 2 or self.stop_event.is_set():
@@ -423,13 +421,17 @@ def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="fav
         total += 1
     total_wins = sum(win_niveis)
     assertividade = (total_wins / total * 100) if total else 0
+    adx_val = None
+    if use_adx:
+        adx_val = api.get_adx(ativo, period=14, size=60)
     return {
         'ativo': ativo,
         'wins': win_niveis,
         'loss': loss,
         'total': total,
         'assertividade': assertividade,
-        'mg_niveis': mg_niveis
+        'mg_niveis': mg_niveis,
+        'adx': adx_val
     }
 
 class BotFullApp(tk.Tk):
@@ -480,7 +482,7 @@ class BotFullApp(tk.Tk):
             "conexao": "",
             "conexao_erro": ""
         }
-        self.sons_ativos = tk.BooleanVar(value=True)  # NOVO: controla se o som está ativo ou não
+        self.sons_ativos = tk.BooleanVar(value=True)
 
         self.load_sound_config()
         self.spinner_running = False
@@ -516,7 +518,6 @@ class BotFullApp(tk.Tk):
         self.var_save_login = tk.BooleanVar(value=False)
         self.check_save_login = ttk.Checkbutton(frame_conn, text="Salvar credenciais", variable=self.var_save_login)
         self.check_save_login.grid(row=1, column=1, columnspan=2, padx=6, pady=4, sticky="w")
-        # NOVO: Botão para ativar/desativar sons
         self.check_sons = ttk.Checkbutton(frame_conn, text="Sons ativados", variable=self.sons_ativos, command=self.update_check_sons_label)
         self.check_sons.grid(row=1, column=3, padx=8, pady=4, sticky="w")
 
@@ -634,7 +635,6 @@ class BotFullApp(tk.Tk):
         else:
             self.check_sons.config(text="Sons desativados")
 
-    # Métodos auxiliares para animação de ampulheta no log
     def start_log_spinner(self, message_tag, base_message):
         self._log_spinner_running = True
         self._log_spinner_state = 0
@@ -937,18 +937,36 @@ class BotFullApp(tk.Tk):
             if not resultados:
                 self.after(0, lambda: self.stop_log_spinner("Nenhum ativo pôde ser analisado.", "#FF4040"))
                 return
-            melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)[:3]
-            msg_final = []
-            for r in melhores:
-                wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
-                msg = (f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | " f"Assertividade: {r['assertividade']:.2f}% | Total: {r['total']}")
-                msg_final.append(msg)
-            if msg_final:
-                self.after(0, lambda: self.stop_log_spinner(msg_final[0], "#FFD700"))
+            melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)
+            if use_adx:
+                melhores_filtrado = [r for r in melhores if r.get('adx') is not None and r['adx'] < 21]
             else:
-                self.after(0, lambda: self.stop_log_spinner("Nenhum resultado disponível.", "#FF4040"))
-            for extra_msg in msg_final[1:]:
-                self.after(0, lambda m=extra_msg: self.log_event(m, "#FFD700"))
+                melhores_filtrado = melhores
+            msg_final = []
+            if melhores_filtrado:
+                for r in melhores_filtrado[:3]:
+                    wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
+                    adx_str = f" | ADX: {r['adx']:.2f}" if use_adx and r.get('adx') is not None else ""
+                    msg = (
+                        f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | "
+                        f"Assertividade: {r['assertividade']:.2f}%{adx_str} | Total: {r['total']}"
+                    )
+                    msg_final.append(msg)
+                self.after(0, lambda: self.stop_log_spinner(msg_final[0], "#FFD700"))
+                for extra_msg in msg_final[1:]:
+                    self.after(0, lambda m=extra_msg: self.log_event(m, "#FFD700"))
+            else:
+                self.after(0, lambda: self.stop_log_spinner(
+                    "Nenhum ativo com ADX operável (<21) entre os melhores.", "#FF8000"))
+                # Mostrar melhores mesmo assim, mas destacados como ADX fora do operacional
+                for r in melhores[:3]:
+                    wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
+                    adx_str = f" | ADX: {r['adx']:.2f} (fora do operacional)" if r.get('adx') is not None else ""
+                    msg = (
+                        f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | "
+                        f"Assertividade: {r['assertividade']:.2f}%{adx_str} | Total: {r['total']}"
+                    )
+                    self.after(0, lambda m=msg: self.log_event(m, "#FF8000"))
         threading.Thread(target=do_catalog, daemon=True).start()
 
     def robot_finished(self):
