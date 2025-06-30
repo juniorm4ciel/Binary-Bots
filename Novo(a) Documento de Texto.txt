@@ -1,0 +1,12 @@
+MODIFIQUE O ROBO ACIMA CONFORME PEDIREI ABAIXO MAS ANTES DE MODIFICAR FAÇA UM RESUMO PRA VER SE VC ENTENDEU. AGORA VOU PEDIR PELA MILONÉSIMA VEZ, QUANDO FIZER A BENDITA ALTERAÇÃO, NÃO OUSE EM MANDAR ESSA PORRA PELA METADE OU MENOR QUE O ARQUIVO ORIGINAL. JÁ ESTOU CANSADO DE VOCÊ MANDAR O ARQUIVO SEMPRE FALTANDO. EU TÔ PAGANDO ESSA PORRA DE I.A. PRA ME ENTREGAR O CÓDIGO COMPLETO. SEGUE AGORA ABAIXO AS MODIFICAÇÕES.
+
+o robô catalogará um quadrante de 5 velas de 1 minuto, e irá observar as 3 ultimas velas dessa quadrante, as três ultimas e não as 3 primeiras velas. E entrará na primeira vela do próximo quadrante de 5 para a minoria que deu nas  ultimas velas do quadrante anterior, ou seja, se no quadrante anterior as 3 ultimas velas foram: call, call e put, a entrada pra primeira vela do quadrante seguinte a esse será para put. entendeu?
+
+no caso das 3 ultimas velas serem da mesma cor entra contra aquelas cores no próximo quadrante, exemplo: call, call, call a entrada seguinte é put. E se tiver doji entre as 3 ultimas velas, ai é ignorado o quadrante e não opera.
+
+Quero que inclua um filtro pra contagem de velas consecutivas da mesma direção, ou seja, se houver de 5 acima é considerado muitas velas repetitivas e isso será mostrado no log durante a catalogação e se ativado esse filtro durante a operação, o robô bloqueará a operação caso haja d5 acima da mesma cor.
+
+ai a catalogação agora muda pra essa nova lógica, mas continuando com o filtro de repetição de velas se ativado, para catalogar e o adx também se tiver ativo, incluindo martingale na catalogação e os níveis selecionados do martingale. E lembrando, caso der loss na primeira entrada, segue normal a lógica do martingale se ativado, e também soros caso der win.
+
+vamos melhorar a questão do adx, o adx somente é utilizado na catalogação pra mostrar em que nível está mas não afetara no resultado da assertividade. E se ativado o adx durante a operação, ele bloqueara sim a operação, mas na catalogação ele não influenciara em nada, só mostrar o nível. Igualmente o filtro de contador de velas, se ativo na catalogação, não excluirá o ativo do resultado e sim mostrará se ele deu muitas velas consecutivas, mas se ativado durante a operação, bloqueara também igual o adx.
+
