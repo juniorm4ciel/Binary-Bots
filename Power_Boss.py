@@ -7,6 +7,7 @@ import time
 import os
 import json
 import sys
+from collections import deque
 
 DEFAULT_SOUNDS = {
     "entry": "sounds/entrada.wav",
@@ -138,7 +139,7 @@ def get_direction(candle):
     elif candle['close'] < candle['open']:
         return 'put'
     else:
-        return None
+        return 'doji' # Alterado para retornar 'doji'
 
 def traduzir_erro(reason):
     if isinstance(reason, dict):
@@ -173,7 +174,7 @@ def traduzir_erro(reason):
     return "Ocorreu um erro desconhecido na corretora."
 
 class PowerBossRobot:
-    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, direction_mode="favor", sound_callback=None, finish_callback=None, update_saldo_callback=None):
+    def __init__(self, api, config, log_callback, stats_callback, lucro_callback, stop_event, sound_callback=None, finish_callback=None, update_saldo_callback=None):
         self.api = api
         self.config = config
         self.log = log_callback
@@ -183,7 +184,6 @@ class PowerBossRobot:
         self.result_stats = {'ops': 0, 'wins': 0, 'losses': 0}
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
-        self.direction_mode = direction_mode
         self.sound_callback = sound_callback
         self.finish_callback = finish_callback
         self.update_saldo_callback = update_saldo_callback
@@ -230,6 +230,26 @@ class PowerBossRobot:
             self.log(f"Erro na ordem: {e}", "#FF4040")
             return None, 0.0
 
+    def get_consecutive_candles_count(self, ativo):
+        candles = self.get_candles(ativo, n=10, size=60)
+        if not candles:
+            return 0
+        
+        last_direction = None
+        count = 0
+        for candle in reversed(candles):
+            direction = get_direction(candle)
+            if direction == 'doji':
+                continue
+            if last_direction is None:
+                last_direction = direction
+                count = 1
+            elif direction == last_direction:
+                count += 1
+            else:
+                break
+        return count
+
     def run(self):
         ativos = list(self.config['ativos'])
         if not ativos:
@@ -237,6 +257,7 @@ class PowerBossRobot:
             if self.finish_callback:
                 self.finish_callback()
             return
+
         self.lucro_acumulado = 0.0
         self.entradas_realizadas = 0
         self.result_stats = {'ops': 0, 'wins': 0, 'losses': 0}
@@ -247,62 +268,66 @@ class PowerBossRobot:
 
         soros_percent = self.config.get('soros', 0)
         soros_ativo = soros_percent > 0
-        prox_soros = None  # valor da próxima entrada se ativar soros
+        prox_soros = None
 
-        self.log("Robô Analisando! (aguardando segunda vela do quadrante) iniciado!", "#FFD700")
+        self.log("Robô iniciado! (Estratégia MHI - Minoria 3 últimas velas)", "#FFD700")
         while not self.stop_event.is_set():
             agora = datetime.datetime.now()
+            # Ponto de entrada é o início do quadrante (minutos 0, 5, 10, ...)
             if agora.minute % 5 == 0 and agora.second < 2:
                 ativo = ativos[ativo_idx % len(ativos)]
                 ativo_idx += 1
-                self.log(f"[QUADRANTE NOVO] Minuto {agora.minute:02d} - Ativo: {ativo}", "#FFD700")
+                self.log(f"[QUADRANTE NOVO] Minuto {agora.minute:02d} - Analisando ativo: {ativo}", "#FFD700")
 
-                # BLOQUEIO ADX: Só opera se ADX < 21, se ativado em config
-                use_adx = self.config.get("adx", False)
-                adx_val = None
-                if use_adx:
-                    adx_val = self.api.get_adx(ativo, period=14, size=60)
-                    if adx_val is not None and adx_val >= 21:
-                        self.log(f"Entrada BLOQUEADA pelo ADX! ADX atual = {adx_val:.2f} (maior ou igual a 21)", "#FFA500")
-                        while True:
-                            now = datetime.datetime.now()
-                            if now.minute % 5 != 0 or now.second > 2 or self.stop_event.is_set():
-                                break
-                            time.sleep(1)
+                # FILTRO DE VELAS CONSECUTIVAS
+                if self.config.get("filtro_velas_consecutivas", False):
+                    consecutive_count = self.get_consecutive_candles_count(ativo)
+                    if consecutive_count >= 5:
+                        self.log(f"Entrada BLOQUEADA pelo filtro de velas! {consecutive_count} velas consecutivas da mesma cor.", "#FFA500")
+                        time.sleep(2) # Pausa para evitar re-análise no mesmo segundo
                         continue
 
-                candles = self.get_candles(ativo, n=2, size=60)
-                if len(candles) < 2:
-                    self.log(f"Não foi possível obter as 2 velas do quadrante para {ativo}.", "#FF4040")
+                # FILTRO ADX
+                if self.config.get("adx", False):
+                    adx_val = self.api.get_adx(ativo, period=14, size=60)
+                    if adx_val is not None and adx_val >= 21:
+                        self.log(f"Entrada BLOQUEADA pelo ADX! ADX atual = {adx_val:.2f} (>= 21)", "#FFA500")
+                        time.sleep(2)
+                        continue
+
+                # Pega as 5 velas do quadrante anterior para análise
+                candles = self.get_candles(ativo, n=5, size=60)
+                if len(candles) < 5:
+                    self.log(f"Não foi possível obter as 5 velas do quadrante para {ativo}.", "#FF4040")
                     time.sleep(3)
                     continue
 
-                primeira_vela = candles[-2]
-                direcao_primeira = get_direction(primeira_vela)
-                if not direcao_primeira:
-                    self.log(f"Primeira vela neutra/doji ({primeira_vela['open']}-{primeira_vela['close']}), pulando quadrante.", "#FF8000")
-                    time.sleep(3)
+                ultimas_tres_velas = candles[-3:]
+                directions = [get_direction(c) for c in ultimas_tres_velas]
+
+                if 'doji' in directions:
+                    self.log(f"Quadrante ignorado em {ativo} devido a um DOJI nas 3 últimas velas.", "#FF8000")
+                    time.sleep(2)
+                    continue
+                
+                # Lógica da Minoria
+                call_count = directions.count('call')
+                put_count = directions.count('put')
+
+                if call_count == put_count: # Improvável com 3 velas, mas para segurança
+                    self.log(f"Quadrante ignorado em {ativo}: empate de direções.", "#FF8000")
+                    time.sleep(2)
                     continue
 
-                if self.direction_mode == "favor":
-                    direcao_entrada = direcao_primeira
+                if call_count > put_count:
+                    direcao_entrada = 'put' # Minoria é PUT
                 else:
-                    direcao_entrada = 'put' if direcao_primeira == 'call' else 'call'
-
-                self.log(f"Primeira vela: {direcao_primeira.upper()} | Entrada na 2ª vela: {('A FAVOR' if self.direction_mode == 'favor' else 'CONTRA')} ({direcao_entrada.upper()})", "#00FFFF")
-
-                alvo_minuto = (agora.minute // 5) * 5 + 1
-                while datetime.datetime.now().minute != alvo_minuto:
-                    if self.stop_event.is_set():
-                        self.log("Robô parado pelo usuário.", "#FFA500")
-                        if self.finish_callback:
-                            self.finish_callback()
-                        return
-                    time.sleep(0.5)
-
+                    direcao_entrada = 'call' # Minoria é CALL
+                
+                self.log(f"Análise {ativo}: {directions} -> Entrada para MINORIA: {direcao_entrada.upper()}", "#00FFFF")
+                
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                # Aplica Soros se estiver ativado e houver valor para próxima entrada
                 if soros_ativo and prox_soros is not None:
                     valor_entrada = prox_soros
                     prox_soros = None
@@ -316,7 +341,8 @@ class PowerBossRobot:
                     self.entradas_realizadas += 1
                     self.stats_callback(self._stats())
                     labelmg = "" if mg_nivel == 0 else f"(MG{mg_nivel})"
-                    self.log(f"Entrando no ativo {ativo} | Entrada: {mg_nivel+1}/{mg_nivel_max+1} | {direcao_entrada.upper()} {labelmg} | Valor: {valor_entrada:.2f}", "#00FFFF")
+                    self.log(f"Entrando em {ativo} | {direcao_entrada.upper()} {labelmg} | Valor: {valor_entrada:.2f}", "#00FFFF")
+                    
                     resultado, lucro_op = self.buy(ativo, valor_entrada, direcao_entrada, self.config['expiracao'])
                     self.lucro_acumulado += lucro_op
                     self.lucro_callback(self.lucro_acumulado)
@@ -324,28 +350,27 @@ class PowerBossRobot:
                     if resultado is None and lucro_op == 0.0:
                         self.log(f"EMPATE (doji) em {ativo} | Valor devolvido.", "#FFD700")
                         self.stats_callback(self._stats())
-                        prox_soros = None  # Não ativa Soros se empate
+                        prox_soros = None
                         break
                     elif resultado is True:
                         self.result_stats['wins'] += 1
-                        self.log(f"WIN no {ativo} com {direcao_entrada.upper()} {labelmg} | Lucro: {lucro_op:.2f}", "#2DC937")
-                        # SÓ ativa Soros se não foi MG e percentual > 0
+                        self.log(f"WIN em {ativo} com {direcao_entrada.upper()} {labelmg} | Lucro: {lucro_op:.2f}", "#2DC937")
                         if soros_ativo and mg_nivel == 0:
                             prox_soros = valor_base + (lucro_op * (soros_percent / 100))
                         else:
                             prox_soros = None
                         self.stats_callback(self._stats())
                         break
-                    else:
+                    else: # Loss
+                        self.result_stats['losses'] += 1
                         if mg_nivel < mg_nivel_max:
-                            self.log(f"LOSS no {ativo} | Indo para Martingale {mg_nivel+1}", "#FF8000")
+                            self.log(f"LOSS em {ativo} | Indo para Martingale {mg_nivel+1}", "#FF8000")
                             mg_nivel += 1
                             self.stats_callback(self._stats())
                             continue
                         else:
-                            self.result_stats['losses'] += 1
-                            self.log(f"LOSS no {ativo} com {direcao_entrada.upper()} {labelmg} | Perda: {lucro_op:.2f}", "#FF4040")
-                            prox_soros = None  # Perdeu, não faz Soros na próxima
+                            self.log(f"LOSS em {ativo} com {direcao_entrada.upper()} {labelmg} | Perda: {lucro_op:.2f}", "#FF4040")
+                            prox_soros = None
                             self.stats_callback(self._stats())
                             break
 
@@ -355,9 +380,12 @@ class PowerBossRobot:
                     if self.finish_callback:
                         self.finish_callback()
                     return
-                time.sleep(3)
+                
+                # *** CORREÇÃO APLICADA: Pausa estática removida ***
+                time.sleep(2) # Pequena pausa para garantir que saia da janela de entrada
             else:
                 time.sleep(0.5)
+        
         self.log("Robô finalizado pelo usuário.", "#FFA500")
         if self.finish_callback:
             self.finish_callback()
@@ -381,57 +409,93 @@ class PowerBossRobot:
     def _stats(self):
         ops = self.result_stats['ops']
         wins = self.result_stats['wins']
-        losses = self.result_stats['losses']
         taxa = (wins / ops * 100) if ops else 0
-        return {'ops': ops, 'wins': wins, 'losses': losses, 'taxa': f"{taxa:.1f}%"}
+        return {'ops': ops, 'wins': wins, 'losses': self.result_stats['losses'], 'taxa': f"{taxa:.1f}%"}
 
-def catalogar_powerboss(api, ativo, minutos=50, mg_niveis=1, direction_mode="favor", use_adx=True):
-    candles = api.get_candles(ativo, 60, minutos + (mg_niveis + 2) * 5)
-    if not candles or len(candles) < (mg_niveis + 2) * 5:
+def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1):
+    # Pega velas suficientes para analisar os quadrantes e os martingales
+    total_velas_necessarias = minutos + (mg_niveis + 1)
+    candles = api.get_candles(ativo, 60, total_velas_necessarias)
+    if not candles or len(candles) < 5:
         return None
-    win_niveis = [0] * (mg_niveis+1)
+
+    win_niveis = [0] * (mg_niveis + 1)
     loss = 0
-    total = 0
-    for idx in range(0, len(candles) - (mg_niveis + 1), 5):
-        ciclo = candles[idx:idx+5+mg_niveis]
-        if len(ciclo) < 5 + mg_niveis:
+    total_ciclos = 0
+    
+    max_consecutive_count = 0
+
+    # Verifica velas consecutivas nos dados históricos
+    consecutive_count = 0
+    last_dir = None
+    for c in candles:
+        current_dir = get_direction(c)
+        if current_dir != 'doji':
+            if current_dir == last_dir:
+                consecutive_count += 1
+            else:
+                last_dir = current_dir
+                consecutive_count = 1
+            if consecutive_count > max_consecutive_count:
+                 max_consecutive_count = consecutive_count
+
+    # Itera pelos quadrantes
+    for i in range(0, len(candles) - 5 - mg_niveis, 5):
+        quadrante_analise = candles[i : i+5]
+        
+        ultimas_tres = quadrante_analise[-3:]
+        directions = [get_direction(c) for c in ultimas_tres]
+
+        if 'doji' in directions:
             continue
-        primeira = ciclo[0]
-        direcao_primeira = get_direction(primeira)
-        if not direcao_primeira:
+
+        call_count = directions.count('call')
+        put_count = directions.count('put')
+
+        if call_count == put_count:
             continue
-        if direction_mode == "favor":
-            direcao_entrada = direcao_primeira
-        else:
-            direcao_entrada = 'put' if direcao_primeira == 'call' else 'call'
-        resultado = None
-        for mg in range(mg_niveis+1):
-            candle_ent = ciclo[1+mg]
-            if candle_ent['close'] == candle_ent['open']:
-                resultado = None
+
+        direcao_entrada = 'put' if call_count > put_count else 'call'
+        total_ciclos += 1
+        
+        # Verifica resultado na vela de entrada e nos martingales
+        resultado_encontrado = False
+        for mg in range(mg_niveis + 1):
+            idx_vela_entrada = i + 5 + mg
+            if idx_vela_entrada >= len(candles):
                 break
-            win = ((direcao_entrada == 'call' and candle_ent['close'] > candle_ent['open']) or (direcao_entrada == 'put' and candle_ent['close'] < candle_ent['open']))
-            if win:
-                resultado = mg
+            
+            vela_entrada = candles[idx_vela_entrada]
+            resultado_vela = get_direction(vela_entrada)
+
+            if resultado_vela == 'doji':
+                # Empate no MG, considera loss do ciclo
                 break
-        if resultado is not None:
-            win_niveis[resultado] += 1
-        else:
+            
+            if resultado_vela == direcao_entrada:
+                win_niveis[mg] += 1
+                resultado_encontrado = True
+                break
+        
+        if not resultado_encontrado:
             loss += 1
-        total += 1
+
+    if total_ciclos == 0:
+        return None
+
     total_wins = sum(win_niveis)
-    assertividade = (total_wins / total * 100) if total else 0
-    adx_val = None
-    if use_adx:
-        adx_val = api.get_adx(ativo, period=14, size=60)
+    assertividade = (total_wins / total_ciclos * 100) if total_ciclos else 0
+    adx_val = api.get_adx(ativo, period=14, size=60)
+
     return {
         'ativo': ativo,
         'wins': win_niveis,
         'loss': loss,
-        'total': total,
+        'total': total_ciclos,
         'assertividade': assertividade,
         'mg_niveis': mg_niveis,
-        'adx': adx_val
+        'adx': adx_val,
+        'velas_consecutivas': max_consecutive_count
     }
 
 class BotFullApp(tk.Tk):
@@ -470,7 +534,6 @@ class BotFullApp(tk.Tk):
         self.robot_thread = None
         self.robot_stop = threading.Event()
         self.ativos = []
-        self.direction_mode = tk.StringVar(value="favor")
         self.lucro_acumulado_display = 0.0
         self.robot_stopped_manual = False
 
@@ -556,7 +619,7 @@ class BotFullApp(tk.Tk):
         self.combo_exp.grid(row=row, column=3, padx=4, pady=3)
         ttk.Label(frame_config, text="Entradas:").grid(row=row, column=4, padx=4, pady=3, sticky="e")
         self.spin_entradas = ttk.Spinbox(frame_config, from_=1, to=50, width=5)
-        self.spin_entradas.set(3)
+        self.spin_entradas.set(10)
         self.spin_entradas.grid(row=row, column=5, padx=4, pady=3)
         row += 1
         ttk.Label(frame_config, text="Soros (%):").grid(row=row, column=0, padx=4, pady=3, sticky="e")
@@ -573,7 +636,9 @@ class BotFullApp(tk.Tk):
         self.combo_mg_niveis.grid(row=row, column=5, padx=4, pady=3)
         row += 1
         self.var_adx = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame_config, text="Usar ADX (<21)", variable=self.var_adx).grid(row=row, column=0, padx=4, pady=3)
+        ttk.Checkbutton(frame_config, text="Filtro ADX (<21)", variable=self.var_adx).grid(row=row, column=0, padx=4, pady=3)
+        self.var_filtro_velas = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame_config, text="Filtro Velas (>=5)", variable=self.var_filtro_velas).grid(row=row, column=1, columnspan=2, padx=4, pady=3, sticky="w")
         ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
         self.entry_stopwin = ttk.Entry(frame_config, width=7)
         self.entry_stopwin.grid(row=row, column=3, padx=4, pady=3)
@@ -582,12 +647,7 @@ class BotFullApp(tk.Tk):
         self.entry_stoploss.grid(row=row, column=5, padx=4, pady=3)
         row += 1
         self.var_stop = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame_config, text="Operar por Lucro/Stop Loss", variable=self.var_stop).grid(row=row, column=0, padx=4, pady=3)
-        ttk.Label(frame_config, text="Modo Direção:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
-        rb_favor = ttk.Radiobutton(frame_config, text="A favor", variable=self.direction_mode, value="favor")
-        rb_contra = ttk.Radiobutton(frame_config, text="Contra", variable=self.direction_mode, value="contra")
-        rb_favor.grid(row=row, column=3, padx=4, pady=3)
-        rb_contra.grid(row=row, column=4, padx=4, pady=3)
+        ttk.Checkbutton(frame_config, text="Operar por Lucro/Stop Loss", variable=self.var_stop).grid(row=row, column=0, columnspan=2, padx=4, pady=3, sticky="w")
 
         frame_ctrl = ttk.LabelFrame(self.main, text="Controle")
         frame_ctrl.grid(row=1, column=1, sticky="nswe", padx=6, pady=4)
@@ -880,19 +940,33 @@ class BotFullApp(tk.Tk):
         def do_update():
             try:
                 ativos_all = self.api.get_all_open_time()
+                
+                if ativos_all is None:
+                    self.after(0, lambda: self.stop_log_spinner("Falha ao buscar ativos. A corretora não respondeu a tempo.", "#FF4040"))
+                    self.after(0, lambda: self.log_event("Verifique sua conexão ou tente novamente mais tarde.", "#FF8000"))
+                    return
+
                 ativos = set()
-                for tipo in ['turbo']:
-                    for ativo, status_ativo in ativos_all[tipo].items():
-                        if status_ativo['open']:
-                            if tipo == "turbo" and (not self.var_otc.get() and '-OTC' in ativo):
-                                continue
-                            ativos.add(ativo)
+                for tipo_ativo in ['digital', 'turbo']:
+                    if tipo_ativo in ativos_all and isinstance(ativos_all[tipo_ativo], dict):
+                        for ativo, status_ativo in ativos_all[tipo_ativo].items():
+                            if isinstance(status_ativo, dict) and status_ativo.get('open'):
+                                if not self.var_otc.get() and '-OTC' in ativo:
+                                    continue
+                                ativos.add(ativo)
+
                 self.ativos = sorted(ativos)
                 self.update_ativos_list()
                 msg = f"Ativos atualizados ({len(self.ativos)} ativos abertos)."
                 self.after(0, lambda: self.stop_log_spinner(msg, "#2DC937"))
+            
+            except TypeError:
+                self.after(0, lambda: self.stop_log_spinner("Erro interno da API ao processar ativos.", "#FF4040"))
+                self.after(0, lambda: self.log_event("A biblioteca da IQ Option falhou. Tente listar os ativos novamente.", "#FF8000"))
             except Exception as e:
                 self.after(0, lambda: self.stop_log_spinner(f"Erro ao buscar ativos: {e}", "#FF4040"))
+                self.after(0, lambda: self.log_event("Pode ser um problema de conexão ou da API da corretora.", "#FF8000"))
+        
         threading.Thread(target=do_update, daemon=True).start()
 
     def update_ativos_list(self, filtrar=""):
@@ -914,60 +988,58 @@ class BotFullApp(tk.Tk):
             self.log_event("Conecte-se para analisar assertividade.", "#FF4040")
             return
         selecionados = self.get_selected_ativos()
-        use_adx = getattr(self, "var_adx", tk.BooleanVar(value=True)).get()
         try:
             mg_niveis = int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1
         except Exception:
             mg_niveis = 1
-        direction_mode = self.direction_mode.get()
+        
         if selecionados:
             ativos_analisar = selecionados
         else:
             ativos_analisar = self.ativos
+        
         resultados = []
         self.start_log_spinner("SPINNER_ASSERT", "Analisando assertividade, aguarde!")
+        
         def do_catalog():
             for ativo in ativos_analisar:
                 try:
-                    res = catalogar_powerboss(self.api, ativo, minutos=50, mg_niveis=mg_niveis, direction_mode=direction_mode, use_adx=use_adx)
+                    res = catalogar_powerboss(self.api, ativo, minutos=60, mg_niveis=mg_niveis)
                     if res:
                         resultados.append(res)
-                except Exception:
+                except Exception as e:
+                    print(f"Erro catalogando {ativo}: {e}") # debug
                     pass
+            
             if not resultados:
                 self.after(0, lambda: self.stop_log_spinner("Nenhum ativo pôde ser analisado.", "#FF4040"))
                 return
+            
             melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)
-            if use_adx:
-                melhores_filtrado = [r for r in melhores if r.get('adx') is not None and r['adx'] < 21]
-            else:
-                melhores_filtrado = melhores
-            msg_final = []
-            if melhores_filtrado:
-                for r in melhores_filtrado[:3]:
-                    wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
-                    adx_str = f" | ADX: {r['adx']:.2f}" if use_adx and r.get('adx') is not None else ""
+            
+            if melhores:
+                self.after(0, lambda: self.stop_log_spinner(f"Melhores Ativos ({len(melhores[:5])} de {len(melhores)}):", "#FFD700"))
+                for r in melhores[:5]: # Mostra os 5 melhores
+                    wins_str_parts = [f"WIN: {r['wins'][0]}"]
+                    for mg in range(1, len(r['wins'])):
+                        wins_str_parts.append(f"MG{mg}: {r['wins'][mg]}")
+                    wins_str = " | ".join(wins_str_parts)
+                    
+                    adx_str = f" | ADX: {r['adx']:.2f}" if r.get('adx') is not None else ""
+                    
+                    velas_count = r.get('velas_consecutivas', 0)
+                    velas_str = f" | Velas Repetitivas: {velas_count}" if velas_count >= 5 else ""
+                    
                     msg = (
-                        f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | "
-                        f"Assertividade: {r['assertividade']:.2f}%{adx_str} | Total: {r['total']}"
+                        f"{r['ativo']} -> {r['assertividade']:.2f}% | {wins_str} | Loss: {r['loss']}{adx_str}{velas_str}"
                     )
-                    msg_final.append(msg)
-                self.after(0, lambda: self.stop_log_spinner(msg_final[0], "#FFD700"))
-                for extra_msg in msg_final[1:]:
-                    self.after(0, lambda m=extra_msg: self.log_event(m, "#FFD700"))
+                    self.after(0, lambda m=msg: self.log_event(m, "#FFD700"))
+
             else:
-                self.after(0, lambda: self.stop_log_spinner(
-                    "Nenhum ativo com ADX operável (<21) entre os melhores.", "#FF8000"))
-                # Mostrar melhores mesmo assim, mas destacados como ADX fora do operacional
-                for r in melhores[:3]:
-                    wins_str = " | ".join([f"Wins 1ª: {r['wins'][0]}"] + [f"Wins MG{mg}: {r['wins'][mg]}" for mg in range(1, len(r['wins']))])
-                    adx_str = f" | ADX: {r['adx']:.2f} (fora do operacional)" if r.get('adx') is not None else ""
-                    msg = (
-                        f"{r['ativo']} -> {wins_str} | Loss: {r['loss']} | "
-                        f"Assertividade: {r['assertividade']:.2f}%{adx_str} | Total: {r['total']}"
-                    )
-                    self.after(0, lambda m=msg: self.log_event(m, "#FF8000"))
+                self.after(0, lambda: self.stop_log_spinner("Nenhum resultado de catalogação.", "#FF8000"))
+
         threading.Thread(target=do_catalog, daemon=True).start()
+
 
     def robot_finished(self):
         self.lbl_robostatus.config(text="Parado", foreground="red")
@@ -991,7 +1063,7 @@ class BotFullApp(tk.Tk):
 
     def start_robot(self):
         if self.robot_thread and self.robot_thread.is_alive():
-            self.log_event("Já está rodando!", "#FF8000")
+            self.log_event("Robô já está rodando!", "#FF8000")
             return
         if not self.api or not self.connected:
             self.log_event("Conecte-se antes de iniciar o robô.", "#FF4040")
@@ -1006,18 +1078,20 @@ class BotFullApp(tk.Tk):
                 "expiracao": int(self.combo_exp.get()),
                 "entradas": int(self.spin_entradas.get()),
                 "soros": int(self.spin_soros.get()),
-                "otc": getattr(self, "var_otc", tk.BooleanVar(value=True)).get(),
-                "martingale": getattr(self, "var_martingale", tk.BooleanVar(value=True)).get(),
+                "otc": self.var_otc.get(),
+                "martingale": self.var_martingale.get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
-                "adx": getattr(self, "var_adx", tk.BooleanVar(value=True)).get(),
-                "stop_lucro": getattr(self, "var_stop", tk.BooleanVar(value=False)).get(),
+                "adx": self.var_adx.get(),
+                "filtro_velas_consecutivas": self.var_filtro_velas.get(),
+                "stop_lucro": self.var_stop.get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
                 "perda": float(self.entry_stoploss.get().replace(",", ".")) if self.entry_stoploss.get() else 0.0,
                 "ativos": ativos
             }
-        except Exception:
-            self.log_event("Preencha corretamente as configurações.", "#FF4040")
+        except Exception as e:
+            self.log_event(f"Preencha corretamente as configurações. Erro: {e}", "#FF4040")
             return
+            
         self.robot_stop.clear()
         self.robot_stopped_manual = False
         self.lbl_robostatus.config(text="Operando", foreground="#FFB000")
@@ -1030,7 +1104,6 @@ class BotFullApp(tk.Tk):
             stats_callback=self.update_stats,
             lucro_callback=self.update_lucro,
             stop_event=self.robot_stop,
-            direction_mode=self.direction_mode.get(),
             sound_callback=self.robot_sound,
             finish_callback=self.robot_finished,
             update_saldo_callback=self.app_update_saldo
