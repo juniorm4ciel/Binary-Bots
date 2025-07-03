@@ -93,7 +93,6 @@ class IQOptionAPI:
     def check_win_v4(self, order_id):
         return self.api.check_win_v4(order_id)
 
-    # Função para pegar ADX das velas (helper)
     def get_adx(self, ativo, period=14, size=60):
         try:
             import numpy as np
@@ -133,16 +132,24 @@ class IQOptionAPI:
         adx[0] = dx[:period].mean()
         for i in range(1, len(dx)):
             adx[i] = (adx[i-1]*(period-1) + dx[i])/period
-        # Retornar o ADX da última vela fechada (ignorar vela em formação)
         return float(adx[-2]) if len(adx) >= 2 else float(adx[-1])
 
-def get_direction(candle):
+# NOVO: Função de direção com filtro de Doji
+def get_direction(candle, use_doji_filter=False, doji_sensitivity_percent=5.0):
+    if use_doji_filter:
+        body = abs(candle['close'] - candle['open'])
+        range_ = candle['max'] - candle['min']
+        if range_ == 0: return 'doji'
+        body_percent_of_range = (body / range_) * 100
+        if body_percent_of_range < doji_sensitivity_percent:
+            return 'doji'
+            
     if candle['close'] > candle['open']:
         return 'call'
     elif candle['close'] < candle['open']:
         return 'put'
     else:
-        return 'doji' # Alterado para retornar 'doji'
+        return 'doji'
 
 def traduzir_erro(reason):
     if isinstance(reason, dict):
@@ -190,6 +197,10 @@ class PowerBossRobot:
         self.sound_callback = sound_callback
         self.finish_callback = finish_callback
         self.update_saldo_callback = update_saldo_callback
+        self.consecutive_losses = {}
+        self.apto_para_operar = {}
+        self.last_analysis_time = {ativo: None for ativo in config.get('ativos', [])}
+
 
     def get_candles(self, ativo, n=10, size=60):
         try:
@@ -200,50 +211,66 @@ class PowerBossRobot:
     def buy(self, ativo, valor, direcao, exp):
         if self.sound_callback:
             self.sound_callback("entry")
+        
+        if not self.api or not self.api.connected:
+            self.log(f"Operação cancelada em {ativo}: API desconectada.", "#FF4040")
+            return None, 0.0
+
         try:
             _, order_id = self.api.buy(valor, ativo, direcao, exp)
             if not order_id:
-                self.log(f"Falha ao enviar ordem para {ativo}.", "#FF4040")
+                self.log(f"Falha ao enviar ordem para {ativo}. A corretora não retornou um ID.", "#FF4040")
                 return None, 0.0
+            
             max_wait = 120
-            start = time.time()
-            while True:
-                status, lucro = self.api.check_win_v4(order_id)
+            check_interval = 0.5
+            max_checks = int(max_wait / check_interval)
+            
+            for i in range(max_checks):
+                if self.stop_event.is_set():
+                    self.log("Verificação de resultado cancelada pelo usuário.", "#FF8000")
+                    return None, 0.0
+                
+                try:
+                    status, lucro = self.api.check_win_v4(order_id)
+                except Exception as e:
+                    self.log(f"Erro ao verificar resultado da ordem: {e}. Tentando novamente...", "#FF8000")
+                    time.sleep(check_interval)
+                    continue
+
                 if status is not None:
-                    if self.update_saldo_callback:
-                        self.update_saldo_callback()
+                    if self.update_saldo_callback: self.update_saldo_callback()
                     if status == 'win' or status is True:
-                        if self.sound_callback:
-                            self.sound_callback("win")
+                        if self.sound_callback: self.sound_callback("win")
                         return True, lucro
                     elif status == 'loose' or status is False:
-                        if self.sound_callback:
-                            self.sound_callback("loss")
+                        if self.sound_callback: self.sound_callback("loss")
                         return False, lucro
-                    elif status == 'equal' or status is None:
+                    elif status == 'equal':
                         return None, lucro
                     else:
-                        self.log(f"Status desconhecido retornado pela API: {status}", "#FF4040")
+                        self.log(f"Status desconhecido retornado: {status}. Finalizando checagem.", "#FF8000")
                         return None, lucro
-                if (time.time() - start) > max_wait or self.stop_event.is_set():
-                    self.log("Timeout ao obter resultado da ordem!", "#FF4040")
-                    return None, 0.0
-                time.sleep(0.2)
-        except Exception as e:
-            self.log(f"Erro na ordem: {e}", "#FF4040")
+                
+                time.sleep(check_interval)
+
+            self.log(f"Timeout ao obter resultado da ordem {order_id} em {ativo}!", "#FF4040")
             return None, 0.0
+
+        except Exception as e:
+            self.log(f"Erro crítico na função de compra: {e}", "#FF4040")
+            return None, 0.0
+
 
     def get_consecutive_candles_count(self, ativo):
         candles = self.get_candles(ativo, n=10, size=60)
-        if not candles:
-            return 0
+        if not candles: return 0
         
         last_direction = None
         count = 0
         for candle in reversed(candles):
-            direction = get_direction(candle)
-            if direction == 'doji':
-                continue
+            direction = get_direction(candle, use_doji_filter=self.config.get("doji_filter", False))
+            if direction == 'doji': continue
             if last_direction is None:
                 last_direction = direction
                 count = 1
@@ -257,8 +284,7 @@ class PowerBossRobot:
         ativos = list(self.config['ativos'])
         if not ativos:
             self.log("Nenhum ativo selecionado!", "#FF4040")
-            if self.finish_callback:
-                self.finish_callback()
+            if self.finish_callback: self.finish_callback()
             return
 
         self.lucro_acumulado = 0.0
@@ -267,129 +293,168 @@ class PowerBossRobot:
         self.lucro_callback(self.lucro_acumulado)
         self.stats_callback({'ops': 0, 'wins': 0, 'losses': 0, 'taxa': "0%"})
         mg_nivel_max = int(self.config.get('mg_niveis', 1))
-        ativo_idx = 0
-
+        
         soros_percent = self.config.get('soros', 0)
         soros_ativo = soros_percent > 0
+        soros_em_mg = self.config.get('soros_em_mg', False)
         prox_soros = None
         
+        filtro_loss_ativo = self.config.get('filtro_loss_seguidos', False)
+        qtd_loss_necessarios = self.config.get('qtd_loss_seguidos', 2)
+        esperar_novo_loss_apos_win = self.config.get('esperar_novo_loss', False)
+        
+        self.consecutive_losses = {ativo: 0 for ativo in ativos}
+        initial_apt_status = not filtro_loss_ativo
+        self.apto_para_operar = {ativo: initial_apt_status for ativo in ativos}
+        self.last_analysis_time = {ativo: None for ativo in ativos}
+
+        if filtro_loss_ativo:
+            self.log(f"Filtro de Loss ativado. Aguardando {qtd_loss_necessarios} loss seguidos para cada ativo individualmente.", "#FFA500")
+
+        ativo_idx = 0
         while not self.stop_event.is_set():
             agora = datetime.datetime.now()
-            # Ponto de entrada é o início do quadrante (minutos 0, 5, 10, ...)
-            if agora.minute % 5 == 0 and agora.second < 2:
-                ativo = ativos[ativo_idx % len(ativos)]
-                ativo_idx += 1
-                self.log(f"[QUADRANTE NOVO] Minuto {agora.minute:02d} - Analisando ativo: {ativo}", "#FFD700")
+            
+            if agora.second > 5:
+                time.sleep(1)
+                continue
 
-                # FILTRO DE VELAS CONSECUTIVAS
+            ativo = ativos[ativo_idx]
+            ativo_idx = (ativo_idx + 1) % len(ativos)
+
+            minuto_atual = agora.minute
+            if minuto_atual % 5 == 0:
+                horario_analise = agora.replace(second=0, microsecond=0)
+                if self.last_analysis_time.get(ativo) == horario_analise:
+                    time.sleep(1)
+                    continue
+                self.last_analysis_time[ativo] = horario_analise
+
+                velas_necessarias = 5 + mg_nivel_max + 5 
+                candles = self.get_candles(ativo, n=velas_necessarias, size=60)
+                if not candles or len(candles) < 5 + mg_nivel_max + 1:
+                    time.sleep(1)
+                    continue
+                
+                quadrante_analise_passado = candles[-(5 + mg_nivel_max + 5):-(5 + mg_nivel_max)]
+                
+                ultimas_tres_velas_passado = quadrante_analise_passado[-3:]
+                directions_passado = [get_direction(c, use_doji_filter=self.config.get("doji_filter", False)) for c in ultimas_tres_velas_passado]
+
+                if 'doji' in directions_passado or directions_passado.count('call') == directions_passado.count('put'):
+                    time.sleep(1)
+                    continue
+                
+                direcao_sinal_passado = 'put' if directions_passado.count('call') > directions_passado.count('put') else 'call'
+                
+                if filtro_loss_ativo:
+                    vitoria_no_ciclo = False
+                    for mg_check in range(mg_nivel_max + 1):
+                        vela_resultado = candles[-(5 + mg_nivel_max) + mg_check]
+                        if get_direction(vela_resultado, use_doji_filter=self.config.get("doji_filter", False)) == direcao_sinal_passado:
+                            vitoria_no_ciclo = True
+                            break
+                    
+                    if vitoria_no_ciclo:
+                        if self.consecutive_losses.get(ativo, 0) > 0:
+                            self.log(f"Ciclo de WIN no passado em {ativo}. Sequência de loss zerada.", "#2DC937")
+                        self.consecutive_losses[ativo] = 0
+                    else:
+                        self.consecutive_losses[ativo] = self.consecutive_losses.get(ativo, 0) + 1
+                        self.log(f"Ciclo de LOSS no passado em {ativo}. Total {self.consecutive_losses[ativo]}/{qtd_loss_necessarios} loss.", "#FF4040")
+
+                    if self.consecutive_losses.get(ativo, 0) >= qtd_loss_necessarios:
+                        if not self.apto_para_operar.get(ativo):
+                            self.log(f"Condição ATINGIDA! {ativo} está APTO para operar.", "#00FF00")
+                        self.apto_para_operar[ativo] = True
+                
+                if not self.apto_para_operar.get(ativo):
+                    time.sleep(1)
+                    continue
+                
+                self.log(f"[ENTRADA AUTORIZADA] Analisando quadrante atual para {ativo}", "#FFD700")
+
+                quadrante_atual = candles[-5:]
+                ultimas_tres_atuais = quadrante_atual[-3:]
+                directions_atuais = [get_direction(c, use_doji_filter=self.config.get("doji_filter", False)) for c in ultimas_tres_atuais]
+
+                if 'doji' in directions_atuais or directions_atuais.count('call') == directions_atuais.count('put'):
+                    self.log(f"Entrada em {ativo} CANCELADA: Sinal atual inválido (doji/empate).", "#FF8000")
+                    time.sleep(1)
+                    continue
+
+                direcao_entrada_real = 'put' if directions_atuais.count('call') > directions_atuais.count('put') else 'call'
+
                 if self.config.get("filtro_velas_consecutivas", False):
-                    consecutive_count = self.get_consecutive_candles_count(ativo)
-                    if consecutive_count >= 4:
-                        self.log(f"Entrada BLOQUEADA pelo filtro de velas! {consecutive_count} velas consecutivas da mesma cor.", "#FFA500")
-                        time.sleep(2) # Pausa para evitar re-análise no mesmo segundo
+                    if self.get_consecutive_candles_count(ativo) >= 4:
+                        self.log(f"Entrada BLOQUEADA em {ativo} (filtro de velas).", "#FFA500")
+                        time.sleep(1)
                         continue
-
-                # FILTRO ADX
                 if self.config.get("adx", False):
                     adx_val = self.api.get_adx(ativo, period=14, size=60)
                     if adx_val is not None and adx_val >= 21:
-                        self.log(f"Entrada BLOQUEADA pelo ADX! ADX atual = {adx_val:.2f} (>= 21)", "#FFA500")
-                        time.sleep(2)
+                        self.log(f"Entrada BLOQUEADA em {ativo} (ADX >= 21).", "#FFA500")
+                        time.sleep(1)
                         continue
-
-                # Pega as 5 velas do quadrante anterior para análise
-                candles = self.get_candles(ativo, n=5, size=60)
-                if len(candles) < 5:
-                    self.log(f"Não foi possível obter as 5 velas do quadrante para {ativo}.", "#FF4040")
-                    time.sleep(3)
-                    continue
-
-                ultimas_tres_velas = candles[-3:]
-                directions = [get_direction(c) for c in ultimas_tres_velas]
-
-                if 'doji' in directions:
-                    self.log(f"Quadrante ignorado em {ativo} devido a um DOJI nas 3 últimas velas.", "#FF8000")
-                    time.sleep(2)
-                    continue
                 
-                # Lógica da Minoria
-                call_count = directions.count('call')
-                put_count = directions.count('put')
-
-                if call_count == put_count: # Improvável com 3 velas, mas para segurança
-                    self.log(f"Quadrante ignorado em {ativo}: empate de direções.", "#FF8000")
-                    time.sleep(2)
-                    continue
-
-                if call_count > put_count:
-                    direcao_entrada = 'put' # Minoria é PUT
-                else:
-                    direcao_entrada = 'call' # Minoria é CALL
-                
-                self.log(f"Análise {ativo}: {directions} -> Entrada para MINORIA: {direcao_entrada.upper()}", "#00FFFF")
+                self.log(f"Análise {ativo}: {directions_atuais} -> ENTRANDO para MINORIA: {direcao_entrada_real.upper()}", "#00FFFF")
                 
                 mg_nivel = 0
                 valor_base = self.config['valor']
-                if soros_ativo and prox_soros is not None:
-                    valor_entrada = prox_soros
-                    prox_soros = None
-                else:
-                    valor_entrada = valor_base
+                valor_entrada = prox_soros if soros_ativo and prox_soros is not None else valor_base
+                prox_soros = None
 
                 while mg_nivel <= mg_nivel_max and not self.stop_event.is_set():
-                    if mg_nivel > 0:
-                        valor_entrada *= 2
+                    if mg_nivel > 0: valor_entrada *= 2
                     self.result_stats['ops'] += 1
                     self.entradas_realizadas += 1
                     self.stats_callback(self._stats())
                     labelmg = "" if mg_nivel == 0 else f"(MG{mg_nivel})"
-                    self.log(f"Entrando em {ativo} | {direcao_entrada.upper()} {labelmg} | Valor: {valor_entrada:.2f}", "#00FFFF")
+                    self.log(f"Entrando em {ativo} | {direcao_entrada_real.upper()} {labelmg} | Valor: {valor_entrada:.2f}", "#00FFFF")
                     
-                    resultado, lucro_op = self.buy(ativo, valor_entrada, direcao_entrada, self.config['expiracao'])
+                    resultado, lucro_op = self.buy(ativo, valor_entrada, direcao_entrada_real, self.config['expiracao'])
                     self.lucro_acumulado += lucro_op
                     self.lucro_callback(self.lucro_acumulado)
 
-                    if resultado is None and lucro_op == 0.0:
-                        self.log(f"EMPATE (doji) em {ativo} | Valor devolvido.", "#FFD700")
-                        self.stats_callback(self._stats())
+                    if resultado is None:
+                        self.log(f"EMPATE em {ativo}. Valor devolvido.", "#FFD700")
                         prox_soros = None
                         break
                     elif resultado is True:
                         self.result_stats['wins'] += 1
-                        self.log(f"WIN em {ativo} com {direcao_entrada.upper()} {labelmg} | Lucro: {lucro_op:.2f}", "#2DC937")
-                        if soros_ativo and mg_nivel == 0:
+                        self.log(f"WIN em {ativo} {labelmg} | Lucro: {lucro_op:.2f}", "#2DC937")
+                        if soros_ativo and (soros_em_mg or mg_nivel == 0):
                             prox_soros = valor_base + (lucro_op * (soros_percent / 100))
-                        else:
-                            prox_soros = None
-                        self.stats_callback(self._stats())
+                        if filtro_loss_ativo and esperar_novo_loss_apos_win:
+                            self.apto_para_operar[ativo] = False
+                            self.consecutive_losses[ativo] = 0
+                            self.log(f"WIN! O ativo {ativo} aguardará um novo ciclo de loss.", "#FFA500")
                         break
-                    else: # Loss
+                    else:
                         self.result_stats['losses'] += 1
                         if mg_nivel < mg_nivel_max:
                             self.log(f"LOSS em {ativo} | Indo para Martingale {mg_nivel+1}", "#FF8000")
                             mg_nivel += 1
-                            self.stats_callback(self._stats())
                             continue
                         else:
-                            self.log(f"LOSS em {ativo} com {direcao_entrada.upper()} {labelmg} | Perda: {lucro_op:.2f}", "#FF4040")
+                            self.log(f"LOSS em {ativo} {labelmg} | Perda: {lucro_op:.2f}", "#FF4040")
                             prox_soros = None
-                            self.stats_callback(self._stats())
+                            if filtro_loss_ativo:
+                                self.apto_para_operar[ativo] = False
+                                self.consecutive_losses[ativo] = 0
+                                self.log(f"LOSS no ciclo! O ativo {ativo} aguardará um novo ciclo de loss.", "#FF4040")
                             break
-
+                
+                self.stats_callback(self._stats())
                 if self.verificar_condicoes_parada():
-                    if self.sound_callback:
-                        self.sound_callback("limit")
-                    if self.finish_callback:
-                        self.finish_callback()
+                    if self.sound_callback: self.sound_callback("limit")
+                    if self.finish_callback: self.finish_callback()
                     return
                 
-                time.sleep(2) # Pequena pausa para garantir que saia da janela de entrada
-            else:
-                time.sleep(0.5)
+            time.sleep(1)
         
         self.log("Robô finalizado pelo usuário.", "#FFA500")
-        if self.finish_callback:
-            self.finish_callback()
+        if self.finish_callback: self.finish_callback()
 
     def verificar_condicoes_parada(self):
         if not self.config['stop_lucro']:
@@ -413,24 +478,25 @@ class PowerBossRobot:
         taxa = (wins / ops * 100) if ops else 0
         return {'ops': ops, 'wins': wins, 'losses': self.result_stats['losses'], 'taxa': f"{taxa:.1f}%"}
 
-def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1):
-    # Pega velas suficientes para analisar os quadrantes e os martingales
-    total_velas_necessarias = minutos + (mg_niveis + 1)
+def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1, qtd_loss_seguidos_analise=2, use_doji_filter=False):
+    total_velas_necessarias = minutos + (mg_niveis * 5) + 20 
     candles = api.get_candles(ativo, 60, total_velas_necessarias)
-    if not candles or len(candles) < 5:
+    if not candles or len(candles) < 5 + mg_niveis:
         return None
 
     win_niveis = [0] * (mg_niveis + 1)
     loss = 0
     total_ciclos = 0
-    
     max_consecutive_count = 0
-
-    # Verifica velas consecutivas nos dados históricos
+    
+    consecutive_loss_counter = 0
+    wins_pos_sequencia = 0
+    oportunidades_pos_sequencia = 0
+    
     consecutive_count = 0
     last_dir = None
     for c in candles:
-        current_dir = get_direction(c)
+        current_dir = get_direction(c, use_doji_filter=use_doji_filter)
         if current_dir != 'doji':
             if current_dir == last_dir:
                 consecutive_count += 1
@@ -440,53 +506,60 @@ def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1):
             if consecutive_count > max_consecutive_count:
                  max_consecutive_count = consecutive_count
 
-    # Itera pelos quadrantes
+    ciclos_passados = []
     for i in range(0, len(candles) - 5 - mg_niveis, 5):
         quadrante_analise = candles[i : i+5]
-        
         ultimas_tres = quadrante_analise[-3:]
-        directions = [get_direction(c) for c in ultimas_tres]
+        directions = [get_direction(c, use_doji_filter=use_doji_filter) for c in ultimas_tres]
 
-        if 'doji' in directions:
+        if 'doji' in directions or directions.count('call') == directions.count('put'):
+            ciclos_passados.append({'resultado': 'invalido'})
             continue
 
-        call_count = directions.count('call')
-        put_count = directions.count('put')
-
-        if call_count == put_count:
-            continue
-
-        direcao_entrada = 'put' if call_count > put_count else 'call'
+        direcao_entrada = 'put' if directions.count('call') > directions.count('put') else 'call'
         total_ciclos += 1
         
-        # Verifica resultado na vela de entrada e nos martingales
         resultado_encontrado = False
+        vitoria_de_primeira = False
         for mg in range(mg_niveis + 1):
             idx_vela_entrada = i + 5 + mg
-            if idx_vela_entrada >= len(candles):
-                break
+            if idx_vela_entrada >= len(candles): break
             
-            vela_entrada = candles[idx_vela_entrada]
-            resultado_vela = get_direction(vela_entrada)
-
-            if resultado_vela == 'doji':
-                # Empate no MG, considera loss do ciclo
-                break
+            resultado_vela = get_direction(candles[idx_vela_entrada], use_doji_filter=use_doji_filter)
+            if resultado_vela == 'doji': break
             
             if resultado_vela == direcao_entrada:
                 win_niveis[mg] += 1
+                if mg == 0: vitoria_de_primeira = True
                 resultado_encontrado = True
                 break
         
-        if not resultado_encontrado:
-            loss += 1
+        if not resultado_encontrado: loss += 1
+        ciclos_passados.append({'resultado': 'win' if resultado_encontrado else 'loss', 'win_primeira': vitoria_de_primeira})
 
-    if total_ciclos == 0:
-        return None
+    for i in range(len(ciclos_passados)):
+        if ciclos_passados[i]['resultado'] == 'loss':
+            consecutive_loss_counter += 1
+        else:
+            consecutive_loss_counter = 0
+
+        if consecutive_loss_counter == qtd_loss_seguidos_analise:
+            if (i + 1) < len(ciclos_passados) and ciclos_passados[i+1]['resultado'] != 'invalido':
+                oportunidades_pos_sequencia += 1
+                if ciclos_passados[i+1]['win_primeira']:
+                    wins_pos_sequencia += 1
+            consecutive_loss_counter = 0
+
+    if total_ciclos == 0: return None
 
     total_wins = sum(win_niveis)
     assertividade = (total_wins / total_ciclos * 100) if total_ciclos else 0
     adx_val = api.get_adx(ativo, period=14, size=60)
+    
+    prob_loss = 1.0 - (assertividade / 100.0)
+    prob_2_losses = prob_loss * prob_loss
+    
+    acerto_pos_loss = (wins_pos_sequencia / oportunidades_pos_sequencia * 100) if oportunidades_pos_sequencia > 0 else 0
 
     return {
         'ativo': ativo,
@@ -496,7 +569,11 @@ def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1):
         'assertividade': assertividade,
         'mg_niveis': mg_niveis,
         'adx': adx_val,
-        'velas_consecutivas': max_consecutive_count
+        'velas_consecutivas': max_consecutive_count,
+        'prob_2_losses': prob_2_losses,
+        'acerto_pos_loss': acerto_pos_loss,
+        'oportunidades_pos_loss': oportunidades_pos_sequencia,
+        'wins_pos_loss': wins_pos_sequencia
     }
 
 class BotFullApp(tk.Tk):
@@ -504,12 +581,12 @@ class BotFullApp(tk.Tk):
         "dark": {
             "#FFD700": "#FFD700", "#00BFFF": "#00BFFF", "#2DC937": "#00FF00",
             "#FF4040": "#FF3030", "#FF8000": "#FFA500", "#FFA500": "#FFD700",
-            "#00FFFF": "#00FFFF", "#FFFFFF": "#FFFFFF"
+            "#00FFFF": "#00FFFF", "#FFFFFF": "#FFFFFF", "#00FF00": "#00FF00"
         },
         "light": {
             "#FFD700": "#FFD700", "#00BFFF": "#00BFFF", "#2DC937": "#00FF00",
             "#FF4040": "#FF3030", "#FF8000": "#FFA500", "#FFA500": "#FFD700",
-            "#00FFFF": "#00FFFF", "#FFFFFF": "#000000"
+            "#00FFFF": "#00FFFF", "#FFFFFF": "#000000", "#00FF00": "#00C800"
         },
         "default": "#FFFFFF"
     }
@@ -545,10 +622,7 @@ class BotFullApp(tk.Tk):
         self.load_login()
         self.after(1000, self.update_clock)
 
-    # *** NOVO: Função para rolagem com o mouse ***
     def _on_mousewheel(self, event):
-        # O delta no Windows é 120, no Linux pode ser diferente.
-        # A divisão normaliza a velocidade da rolagem.
         self.asset_canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     def create_widgets(self):
@@ -614,7 +688,6 @@ class BotFullApp(tk.Tk):
         self.checkbox_frame = ttk.Frame(self.asset_canvas)
         self.asset_canvas.create_window((0, 0), window=self.checkbox_frame, anchor="nw")
         
-        # *** NOVO: Vincula o evento de rolagem ao canvas e ao frame interno ***
         self.asset_canvas.bind("<MouseWheel>", self._on_mousewheel)
         self.checkbox_frame.bind("<MouseWheel>", self._on_mousewheel)
         
@@ -660,15 +733,35 @@ class BotFullApp(tk.Tk):
         ttk.Checkbutton(frame_config, text="Filtro ADX (<21)", variable=self.var_adx).grid(row=row, column=0, padx=4, pady=3)
         self.var_filtro_velas = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Filtro Velas (>=4)", variable=self.var_filtro_velas).grid(row=row, column=1, columnspan=2, padx=4, pady=3, sticky="w")
-        ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
-        self.entry_stopwin = ttk.Entry(frame_config, width=7)
-        self.entry_stopwin.grid(row=row, column=3, padx=4, pady=3)
-        ttk.Label(frame_config, text="Stop Loss $:").grid(row=row, column=4, padx=4, pady=3, sticky="e")
-        self.entry_stoploss = ttk.Entry(frame_config, width=7)
-        self.entry_stoploss.grid(row=row, column=5, padx=4, pady=3)
+        
+        # NOVO: Filtro de Doji
+        self.var_doji_filter = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame_config, text="Filtro de Doji (vela sem corpo)", variable=self.var_doji_filter).grid(row=row, column=3, columnspan=3, padx=4, pady=3, sticky="w")
         row += 1
+
+        ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=0, padx=4, pady=3, sticky="e")
+        self.entry_stopwin = ttk.Entry(frame_config, width=7)
+        self.entry_stopwin.grid(row=row, column=1, padx=4, pady=3)
+        ttk.Label(frame_config, text="Stop Loss $:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
+        self.entry_stoploss = ttk.Entry(frame_config, width=7)
+        self.entry_stoploss.grid(row=row, column=3, padx=4, pady=3)
         self.var_stop = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame_config, text="Operar por Lucro/Stop Loss", variable=self.var_stop).grid(row=row, column=0, columnspan=2, padx=4, pady=3, sticky="w")
+        ttk.Checkbutton(frame_config, text="Stop por Lucro", variable=self.var_stop).grid(row=row, column=4, columnspan=2, padx=4, pady=3, sticky="w")
+        row += 1
+
+        self.var_filtro_loss_seguidos = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame_config, text="Filtro de Loss Seguidos", variable=self.var_filtro_loss_seguidos).grid(row=row, column=0, columnspan=2, padx=4, pady=3, sticky="w")
+        ttk.Label(frame_config, text="Qtd Loss:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
+        self.spin_loss_seguidos = ttk.Spinbox(frame_config, from_=1, to=10, width=5)
+        self.spin_loss_seguidos.set(2)
+        self.spin_loss_seguidos.grid(row=row, column=3, padx=4, pady=3)
+        row += 1
+        self.var_esperar_novo_loss = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame_config, text="Aguardar novo ciclo de loss após WIN", variable=self.var_esperar_novo_loss).grid(row=row, column=0, columnspan=3, padx=4, pady=3, sticky="w")
+        
+        row += 1
+        self.var_soros_em_mg = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame_config, text="Aplicar Soros após Win no Martingale", variable=self.var_soros_em_mg).grid(row=row, column=0, columnspan=3, padx=4, pady=3, sticky="w")
 
         frame_ctrl = ttk.LabelFrame(self.main, text="Controle")
         frame_ctrl.grid(row=1, column=1, sticky="nswe", padx=6, pady=4)
@@ -718,50 +811,41 @@ class BotFullApp(tk.Tk):
 
     def start_log_spinner(self, message_tag, base_message):
         self._log_spinner_running = True
-        self._log_spinner_state = 0
-        self._log_spinner_tag = message_tag
-        self._log_spinner_base = base_message
-        self._log_spinner_frames = ["⏳", "⌛"]
-        self._log_spinner_after_id = None
-
-        def update_spinner():
-            if not getattr(self, "_log_spinner_running", False):
-                return
-            spin = self._log_spinner_frames[self._log_spinner_state % len(self._log_spinner_frames)]
-            msg = f"{self._log_spinner_base} {spin}"
-            self.text_log.config(state="normal")
-            last_line_idx = self.text_log.index("end-2l linestart")
-            self.text_log.delete(last_line_idx, "end-1l lineend")
-            self.text_log.insert(last_line_idx, msg + "\n")
-            self.text_log.tag_add(self._log_spinner_tag, last_line_idx, f"{last_line_idx} lineend")
-            self.text_log.tag_config(self._log_spinner_tag, foreground="#FFA500")
-            self.text_log.config(state="disabled")
-            self.text_log.see("end")
-            self._log_spinner_state += 1
-            self._log_spinner_after_id = self.after(500, update_spinner)
         self.text_log.config(state="normal")
-        self.text_log.insert("end", f"{self._log_spinner_base} {self._log_spinner_frames[0]}\n")
-        last_line_idx = self.text_log.index("end-2l linestart")
-        self.text_log.tag_add(self._log_spinner_tag, last_line_idx, f"{last_line_idx} lineend")
-        self.text_log.tag_config(self._log_spinner_tag, foreground="#FFA500")
+        self.text_log.insert("end", f"{base_message} \n", message_tag)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
-        self._log_spinner_state = 1
-        self.text_log.update_idletasks()
-        update_spinner()
+        
+        def update_spinner(tag, state=0):
+            if not getattr(self, "_log_spinner_running", False):
+                return
+            frames = ["⏳", "⌛"]
+            spin = frames[state % len(frames)]
+            self.text_log.config(state="normal")
+            try:
+                line_start = self.text_log.index(f"{tag}.first")
+                line_end = f"{line_start} lineend"
+                self.text_log.delete(line_start, line_end)
+                self.text_log.insert(line_start, f"{base_message} {spin}", tag)
+            except tk.TclError:
+                return 
+            self.text_log.config(state="disabled")
+            self.after(500, update_spinner, tag, state + 1)
+        
+        self.after(500, update_spinner, message_tag)
 
-    def stop_log_spinner(self, final_message, color="#FFD700"):
+    def stop_log_spinner(self, tag, final_message, color="#FFD700"):
         self._log_spinner_running = False
-        if getattr(self, "_log_spinner_after_id", None):
-            self.after_cancel(self._log_spinner_after_id)
-            self._log_spinner_after_id = None
         self.text_log.config(state="normal")
-        last_line_idx = self.text_log.index("end-2l linestart")
-        self.text_log.delete(last_line_idx, "end-1l lineend")
-        self.text_log.insert(last_line_idx, final_message + "\n")
-        tag_color = self.get_log_color(color)
-        self.text_log.tag_add("SPINNER_FINAL", last_line_idx, f"{last_line_idx} lineend")
-        self.text_log.tag_config("SPINNER_FINAL", foreground=tag_color)
+        try:
+            line_start = self.text_log.index(f"{tag}.first")
+            line_end = f"{line_start} lineend"
+            self.text_log.delete(line_start, line_end)
+            self.text_log.insert(line_start, final_message, f"FINAL_{tag}")
+            tag_color = self.get_log_color(color)
+            self.text_log.tag_config(f"FINAL_{tag}", foreground=tag_color)
+        except tk.TclError:
+            self.log_event(final_message, color)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
 
@@ -947,13 +1031,11 @@ class BotFullApp(tk.Tk):
             self.log_event("Conecte-se para buscar ativos.", "#FF4040")
             return
         self.start_log_spinner("SPINNER_ATIVOS", "Listando ativos, aguarde!")
-        self.text_log.update_idletasks()
         def do_update():
             try:
                 ativos_all = self.api.get_all_open_time()
                 if ativos_all is None:
-                    self.after(0, lambda: self.stop_log_spinner("Falha ao buscar ativos. A corretora não respondeu a tempo.", "#FF4040"))
-                    self.after(0, lambda: self.log_event("Verifique sua conexão ou tente novamente mais tarde.", "#FF8000"))
+                    self.after(0, lambda: self.stop_log_spinner("SPINNER_ATIVOS", "Falha ao buscar ativos.", "#FF4040"))
                     return
                 ativos = set()
                 for tipo_ativo in ['digital', 'turbo']:
@@ -964,14 +1046,10 @@ class BotFullApp(tk.Tk):
                                 ativos.add(ativo)
                 self.ativos = sorted(ativos)
                 self.after(0, self.populate_asset_list)
-                msg = f"Ativos atualizados ({len(self.ativos)} ativos abertos)."
-                self.after(0, lambda: self.stop_log_spinner(msg, "#2DC937"))
-            except TypeError:
-                self.after(0, lambda: self.stop_log_spinner("Erro interno da API ao processar ativos.", "#FF4040"))
-                self.after(0, lambda: self.log_event("A biblioteca da IQ Option falhou. Tente listar os ativos novamente.", "#FF8000"))
+                msg = f"Ativos atualizados ({len(self.ativos)})."
+                self.after(0, lambda: self.stop_log_spinner("SPINNER_ATIVOS", msg, "#2DC937"))
             except Exception as e:
-                self.after(0, lambda: self.stop_log_spinner(f"Erro ao buscar ativos: {e}", "#FF4040"))
-                self.after(0, lambda: self.log_event("Pode ser um problema de conexão ou da API da corretora.", "#FF8000"))
+                self.after(0, lambda: self.stop_log_spinner("SPINNER_ATIVOS", f"Erro ao buscar ativos: {e}", "#FF4040"))
         threading.Thread(target=do_update, daemon=True).start()
 
     def populate_asset_list(self):
@@ -983,7 +1061,6 @@ class BotFullApp(tk.Tk):
             cb = ttk.Checkbutton(self.checkbox_frame, text=asset, variable=var)
             self.asset_checkboxes[asset] = cb
             cb.pack(anchor="w", padx=5, pady=2)
-            # *** NOVO: Vincula o evento de rolagem a cada checkbox criado ***
             cb.bind("<MouseWheel>", self._on_mousewheel)
         self.asset_canvas.yview_moveto(0)
 
@@ -1004,6 +1081,9 @@ class BotFullApp(tk.Tk):
         selecionados = self.get_selected_ativos()
         try: mg_niveis = int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1
         except Exception: mg_niveis = 1
+        try: qtd_loss_analise = int(self.spin_loss_seguidos.get())
+        except Exception: qtd_loss_analise = 2
+            
         ativos_analisar = selecionados or self.ativos
         if not ativos_analisar: self.log_event("Nenhum ativo para analisar.", "#FF8000"); return
         
@@ -1012,11 +1092,11 @@ class BotFullApp(tk.Tk):
         
         def do_catalog():
             try: payouts = self.api.get_all_profit()
-            except Exception: payouts = {}; self.after(0, lambda: self.log_event("Não foi possível obter os payouts para a catalogação.", "#FF8000"))
+            except Exception: payouts = {}; self.after(0, lambda: self.log_event("Não foi possível obter os payouts.", "#FF8000"))
 
             for ativo in ativos_analisar:
                 try:
-                    res = catalogar_powerboss(self.api, ativo, minutos=60, mg_niveis=mg_niveis)
+                    res = catalogar_powerboss(self.api, ativo, minutos=60, mg_niveis=mg_niveis, qtd_loss_seguidos_analise=qtd_loss_analise, use_doji_filter=self.var_doji_filter.get())
                     if res:
                         payout_info = payouts.get(ativo, {})
                         payout = payout_info.get('turbo') or payout_info.get('binary')
@@ -1024,21 +1104,23 @@ class BotFullApp(tk.Tk):
                         resultados.append(res)
                 except Exception as e: print(f"Erro catalogando {ativo}: {e}")
             
-            if not resultados: self.after(0, lambda: self.stop_log_spinner("Nenhum ativo pôde ser analisado.", "#FF4040")); return
+            if not resultados: self.after(0, lambda: self.stop_log_spinner("SPINNER_ASSERT", "Nenhum ativo pôde ser analisado.", "#FF4040")); return
             
             melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)
             
-            self.after(0, lambda: self.stop_log_spinner(f"Melhores Ativos ({len(melhores[:5])} de {len(melhores)}):", "#FFD700"))
+            self.after(0, lambda: self.stop_log_spinner("SPINNER_ASSERT", f"Melhores Ativos (Análise Pós-{qtd_loss_analise} Loss):", "#FFD700"))
             for r in melhores[:5]:
                 wins_str_parts = [f"W0: {r['wins'][0]}"]
                 for mg in range(1, len(r['wins'])): wins_str_parts.append(f"MG{mg}: {r['wins'][mg]}")
                 wins_str = " | ".join(wins_str_parts)
-                adx_str = f" | ADX: {r['adx']:.2f}" if r.get('adx') is not None else ""
-                velas_count = r.get('velas_consecutivas', 0)
-                velas_str = f" | Velas Repetitivas: {velas_count}" if velas_count >= 4 else ""
                 payout_val = r.get('payout')
                 payout_str = f" | Payout: {payout_val*100:.0f}%" if isinstance(payout_val, float) else ""
-                msg = f"{r['ativo']} -> {r['assertividade']:.2f}%{payout_str} | {wins_str} | Loss: {r['loss']}{adx_str}{velas_str}"
+                
+                acerto_pos_loss_str = ""
+                if r['oportunidades_pos_loss'] > 0:
+                    acerto_pos_loss_str = f" | Acerto Pós-Loss (1ª Vela): {r['acerto_pos_loss']:.0f}% ({r['wins_pos_loss']}/{r['oportunidades_pos_loss']})"
+                
+                msg = f"{r['ativo']} -> {r['assertividade']:.2f}%{payout_str} | {wins_str} | Loss: {r['loss']}{acerto_pos_loss_str}"
                 self.after(0, lambda m=msg: self.log_event(m, "#FFD700"))
         threading.Thread(target=do_catalog, daemon=True).start()
 
@@ -1082,10 +1164,15 @@ class BotFullApp(tk.Tk):
                 "otc": self.var_otc.get(), "martingale": self.var_martingale.get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
                 "adx": self.var_adx.get(), "filtro_velas_consecutivas": self.var_filtro_velas.get(),
+                "doji_filter": self.var_doji_filter.get(), # NOVO
                 "stop_lucro": self.var_stop.get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
                 "perda": float(self.entry_stoploss.get().replace(",", ".")) if self.entry_stoploss.get() else 0.0,
-                "ativos": ativos
+                "ativos": ativos,
+                "filtro_loss_seguidos": self.var_filtro_loss_seguidos.get(),
+                "qtd_loss_seguidos": int(self.spin_loss_seguidos.get()),
+                "esperar_novo_loss": self.var_esperar_novo_loss.get(),
+                "soros_em_mg": self.var_soros_em_mg.get()
             }
         except Exception as e: self.log_event(f"Preencha corretamente as configurações. Erro: {e}", "#FF4040"); return
             
