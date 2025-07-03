@@ -78,6 +78,9 @@ class IQOptionAPI:
 
     def get_all_open_time(self):
         return self.api.get_all_open_time()
+    
+    def get_all_profit(self):
+        return self.api.get_all_profit()
 
     def get_candles(self, ativo, interval, n, now=None):
         now = now or time.time()
@@ -269,8 +272,7 @@ class PowerBossRobot:
         soros_percent = self.config.get('soros', 0)
         soros_ativo = soros_percent > 0
         prox_soros = None
-
-        self.log("Robô iniciado! (Estratégia MHI - Minoria 3 últimas velas)", "#FFD700")
+        
         while not self.stop_event.is_set():
             agora = datetime.datetime.now()
             # Ponto de entrada é o início do quadrante (minutos 0, 5, 10, ...)
@@ -282,7 +284,7 @@ class PowerBossRobot:
                 # FILTRO DE VELAS CONSECUTIVAS
                 if self.config.get("filtro_velas_consecutivas", False):
                     consecutive_count = self.get_consecutive_candles_count(ativo)
-                    if consecutive_count >= 5:
+                    if consecutive_count >= 4:
                         self.log(f"Entrada BLOQUEADA pelo filtro de velas! {consecutive_count} velas consecutivas da mesma cor.", "#FFA500")
                         time.sleep(2) # Pausa para evitar re-análise no mesmo segundo
                         continue
@@ -381,7 +383,6 @@ class PowerBossRobot:
                         self.finish_callback()
                     return
                 
-                # *** CORREÇÃO APLICADA: Pausa estática removida ***
                 time.sleep(2) # Pequena pausa para garantir que saia da janela de entrada
             else:
                 time.sleep(0.5)
@@ -501,22 +502,14 @@ def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1):
 class BotFullApp(tk.Tk):
     LOG_COLORS = {
         "dark": {
-            "#FFD700": "#FFD700",
-            "#00BFFF": "#00BFFF",
-            "#2DC937": "#00FF00",
-            "#FF4040": "#FF3030",
-            "#FF8000": "#FFA500",
-            "#FFA500": "#FFD700",
-            "#00FFFF": "#00FFFF",
+            "#FFD700": "#FFD700", "#00BFFF": "#00BFFF", "#2DC937": "#00FF00",
+            "#FF4040": "#FF3030", "#FF8000": "#FFA500", "#FFA500": "#FFD700",
+            "#00FFFF": "#00FFFF", "#FFFFFF": "#FFFFFF"
         },
         "light": {
-            "#FFD700": "#FFD700",
-            "#00BFFF": "#00BFFF",
-            "#2DC937": "#00FF00",
-            "#FF4040": "#FF3030",
-            "#FF8000": "#FFA500",
-            "#FFA500": "#FFD700",
-            "#00FFFF": "#00FFFF",
+            "#FFD700": "#FFD700", "#00BFFF": "#00BFFF", "#2DC937": "#00FF00",
+            "#FF4040": "#FF3030", "#FF8000": "#FFA500", "#FFA500": "#FFD700",
+            "#00FFFF": "#00FFFF", "#FFFFFF": "#000000"
         },
         "default": "#FFFFFF"
     }
@@ -536,14 +529,13 @@ class BotFullApp(tk.Tk):
         self.ativos = []
         self.lucro_acumulado_display = 0.0
         self.robot_stopped_manual = False
+        
+        self.asset_vars = {}
+        self.asset_checkboxes = {}
 
         self.sound_files = {
-            "entry": "",
-            "win": "",
-            "loss": "",
-            "limit": "",
-            "conexao": "",
-            "conexao_erro": ""
+            "entry": "", "win": "", "loss": "", "limit": "",
+            "conexao": "", "conexao_erro": ""
         }
         self.sons_ativos = tk.BooleanVar(value=True)
 
@@ -552,6 +544,12 @@ class BotFullApp(tk.Tk):
         self.create_widgets()
         self.load_login()
         self.after(1000, self.update_clock)
+
+    # *** NOVO: Função para rolagem com o mouse ***
+    def _on_mousewheel(self, event):
+        # O delta no Windows é 120, no Linux pode ser diferente.
+        # A divisão normaliza a velocidade da rolagem.
+        self.asset_canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     def create_widgets(self):
         frame_conn = ttk.LabelFrame(self, text="Conexão")
@@ -591,20 +589,43 @@ class BotFullApp(tk.Tk):
         self.main.columnconfigure(2, weight=2)
         self.main.rowconfigure(0, weight=1)
         self.main.rowconfigure(1, weight=1)
-
+        
         frame_ativos = ttk.LabelFrame(self.main, text="Ativos")
         frame_ativos.grid(row=0, column=0, rowspan=2, sticky="nswe", padx=6, pady=4)
-        self.entry_busca_ativo = ttk.Entry(frame_ativos, width=17)
-        self.entry_busca_ativo.pack(padx=5, pady=3)
+        frame_ativos.rowconfigure(1, weight=1)
+        frame_ativos.columnconfigure(0, weight=1)
+
+        self.entry_busca_ativo = ttk.Entry(frame_ativos)
+        self.entry_busca_ativo.grid(row=0, column=0, sticky="ew", padx=5, pady=(5,0))
         self.entry_busca_ativo.bind("<KeyRelease>", self.filter_ativos)
-        self.list_ativos = tk.Listbox(frame_ativos, width=22, height=14, selectmode="multiple")
-        self.list_ativos.pack(padx=5, pady=3, fill="y")
+
+        canvas_frame = ttk.Frame(frame_ativos)
+        canvas_frame.grid(row=1, column=0, sticky='nsew', pady=(5,0))
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
+
+        self.asset_canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+        self.asset_canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=self.asset_canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.asset_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.checkbox_frame = ttk.Frame(self.asset_canvas)
+        self.asset_canvas.create_window((0, 0), window=self.checkbox_frame, anchor="nw")
+        
+        # *** NOVO: Vincula o evento de rolagem ao canvas e ao frame interno ***
+        self.asset_canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.checkbox_frame.bind("<MouseWheel>", self._on_mousewheel)
+        
+        self.checkbox_frame.bind("<Configure>", lambda e: self.asset_canvas.configure(scrollregion=self.asset_canvas.bbox("all")))
+        
         btns_ativos = ttk.Frame(frame_ativos)
-        btns_ativos.pack(pady=2)
+        btns_ativos.grid(row=2, column=0, pady=5)
         ttk.Button(btns_ativos, text="Listar Ativos", command=self.atualiza_ativos).pack(side="left", padx=3)
         ttk.Button(btns_ativos, text="Analisar Assertividade", command=self.catalogar_ativo).pack(side="left", padx=3)
         self.lbl_clock = tk.Label(frame_ativos, text="", font=("Arial", 28, "bold"), fg="#FFD700", bg="#222")
-        self.lbl_clock.pack(pady=(12, 6))
+        self.lbl_clock.grid(row=3, column=0, pady=(12, 6))
 
         frame_config = ttk.LabelFrame(self.main, text="Configuração do Robô")
         frame_config.grid(row=0, column=1, sticky="nswe", padx=6, pady=4)
@@ -638,7 +659,7 @@ class BotFullApp(tk.Tk):
         self.var_adx = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Filtro ADX (<21)", variable=self.var_adx).grid(row=row, column=0, padx=4, pady=3)
         self.var_filtro_velas = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame_config, text="Filtro Velas (>=5)", variable=self.var_filtro_velas).grid(row=row, column=1, columnspan=2, padx=4, pady=3, sticky="w")
+        ttk.Checkbutton(frame_config, text="Filtro Velas (>=4)", variable=self.var_filtro_velas).grid(row=row, column=1, columnspan=2, padx=4, pady=3, sticky="w")
         ttk.Label(frame_config, text="Stop Win $:").grid(row=row, column=2, padx=4, pady=3, sticky="e")
         self.entry_stopwin = ttk.Entry(frame_config, width=7)
         self.entry_stopwin.grid(row=row, column=3, padx=4, pady=3)
@@ -895,19 +916,11 @@ class BotFullApp(tk.Tk):
         if file and os.path.exists(resource_path(file)):
             play_sound(sound_file=file)
         else:
-            if event == "entry":
-                play_sound(freq=880, dur=180)
-            elif event == "win":
-                play_sound(freq=1200, dur=250)
-            elif event == "loss":
-                play_sound(freq=400, dur=300)
-            elif event == "limit":
-                play_sound(freq=500, dur=180)
-                play_sound(freq=800, dur=220)
-                play_sound(freq=500, dur=180)
-            elif event == "conexao_erro":
-                play_sound(freq=200, dur=500)
-                play_sound(freq=120, dur=350)
+            if event == "entry": play_sound(freq=880, dur=180)
+            elif event == "win": play_sound(freq=1200, dur=250)
+            elif event == "loss": play_sound(freq=400, dur=300)
+            elif event == "limit": play_sound(freq=500, dur=180); play_sound(freq=800, dur=220); play_sound(freq=500, dur=180)
+            elif event == "conexao_erro": play_sound(freq=200, dur=500); play_sound(freq=120, dur=350)
 
     def log_event(self, msg, color="#FFD700"):
         now = datetime.datetime.now().strftime('%H:%M:%S')
@@ -921,10 +934,8 @@ class BotFullApp(tk.Tk):
         self.text_log.see("end")
 
     def get_log_color(self, color):
-        if self.theme_mode == "dark":
-            return self.LOG_COLORS["dark"].get(color, self.LOG_COLORS["default"])
-        else:
-            return self.LOG_COLORS["light"].get(color, self.LOG_COLORS["default"])
+        theme_colors = self.LOG_COLORS.get(self.theme_mode, self.LOG_COLORS["dark"])
+        return theme_colors.get(color, self.LOG_COLORS["default"])
 
     def clear_log(self):
         self.text_log.config(state="normal")
@@ -940,106 +951,96 @@ class BotFullApp(tk.Tk):
         def do_update():
             try:
                 ativos_all = self.api.get_all_open_time()
-                
                 if ativos_all is None:
                     self.after(0, lambda: self.stop_log_spinner("Falha ao buscar ativos. A corretora não respondeu a tempo.", "#FF4040"))
                     self.after(0, lambda: self.log_event("Verifique sua conexão ou tente novamente mais tarde.", "#FF8000"))
                     return
-
                 ativos = set()
                 for tipo_ativo in ['digital', 'turbo']:
                     if tipo_ativo in ativos_all and isinstance(ativos_all[tipo_ativo], dict):
                         for ativo, status_ativo in ativos_all[tipo_ativo].items():
                             if isinstance(status_ativo, dict) and status_ativo.get('open'):
-                                if not self.var_otc.get() and '-OTC' in ativo:
-                                    continue
+                                if not self.var_otc.get() and '-OTC' in ativo: continue
                                 ativos.add(ativo)
-
                 self.ativos = sorted(ativos)
-                self.update_ativos_list()
+                self.after(0, self.populate_asset_list)
                 msg = f"Ativos atualizados ({len(self.ativos)} ativos abertos)."
                 self.after(0, lambda: self.stop_log_spinner(msg, "#2DC937"))
-            
             except TypeError:
                 self.after(0, lambda: self.stop_log_spinner("Erro interno da API ao processar ativos.", "#FF4040"))
                 self.after(0, lambda: self.log_event("A biblioteca da IQ Option falhou. Tente listar os ativos novamente.", "#FF8000"))
             except Exception as e:
                 self.after(0, lambda: self.stop_log_spinner(f"Erro ao buscar ativos: {e}", "#FF4040"))
                 self.after(0, lambda: self.log_event("Pode ser um problema de conexão ou da API da corretora.", "#FF8000"))
-        
         threading.Thread(target=do_update, daemon=True).start()
 
-    def update_ativos_list(self, filtrar=""):
-        self.list_ativos.delete(0, tk.END)
-        for ativo in self.ativos:
-            if not filtrar or filtrar.lower() in ativo.lower():
-                self.list_ativos.insert(tk.END, ativo)
+    def populate_asset_list(self):
+        for widget in self.checkbox_frame.winfo_children(): widget.destroy()
+        self.asset_checkboxes.clear()
+        for asset in self.ativos:
+            if asset not in self.asset_vars: self.asset_vars[asset] = tk.BooleanVar()
+            var = self.asset_vars[asset]
+            cb = ttk.Checkbutton(self.checkbox_frame, text=asset, variable=var)
+            self.asset_checkboxes[asset] = cb
+            cb.pack(anchor="w", padx=5, pady=2)
+            # *** NOVO: Vincula o evento de rolagem a cada checkbox criado ***
+            cb.bind("<MouseWheel>", self._on_mousewheel)
+        self.asset_canvas.yview_moveto(0)
 
-    def filter_ativos(self, event):
-        texto = self.entry_busca_ativo.get().strip()
-        self.update_ativos_list(filtrar=texto)
+    def filter_ativos(self, event=None):
+        texto = self.entry_busca_ativo.get().strip().lower()
+        for asset, checkbox in self.asset_checkboxes.items():
+            if texto in asset.lower():
+                if not checkbox.winfo_ismapped(): checkbox.pack(anchor="w", padx=5, pady=2)
+            else:
+                checkbox.pack_forget()
 
     def get_selected_ativos(self):
-        indices = self.list_ativos.curselection()
-        return [self.list_ativos.get(i) for i in indices]
+        return [asset for asset, var in self.asset_vars.items() if var.get()]
 
     def catalogar_ativo(self):
         if not self.api or not self.connected:
-            self.log_event("Conecte-se para analisar assertividade.", "#FF4040")
-            return
+            self.log_event("Conecte-se para analisar assertividade.", "#FF4040"); return
         selecionados = self.get_selected_ativos()
-        try:
-            mg_niveis = int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1
-        except Exception:
-            mg_niveis = 1
-        
-        if selecionados:
-            ativos_analisar = selecionados
-        else:
-            ativos_analisar = self.ativos
+        try: mg_niveis = int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1
+        except Exception: mg_niveis = 1
+        ativos_analisar = selecionados or self.ativos
+        if not ativos_analisar: self.log_event("Nenhum ativo para analisar.", "#FF8000"); return
         
         resultados = []
-        self.start_log_spinner("SPINNER_ASSERT", "Analisando assertividade, aguarde!")
+        self.start_log_spinner("SPINNER_ASSERT", f"Analisando assertividade de {len(ativos_analisar)} ativo(s)...")
         
         def do_catalog():
+            try: payouts = self.api.get_all_profit()
+            except Exception: payouts = {}; self.after(0, lambda: self.log_event("Não foi possível obter os payouts para a catalogação.", "#FF8000"))
+
             for ativo in ativos_analisar:
                 try:
                     res = catalogar_powerboss(self.api, ativo, minutos=60, mg_niveis=mg_niveis)
                     if res:
+                        payout_info = payouts.get(ativo, {})
+                        payout = payout_info.get('turbo') or payout_info.get('binary')
+                        res['payout'] = payout
                         resultados.append(res)
-                except Exception as e:
-                    print(f"Erro catalogando {ativo}: {e}") # debug
-                    pass
+                except Exception as e: print(f"Erro catalogando {ativo}: {e}")
             
-            if not resultados:
-                self.after(0, lambda: self.stop_log_spinner("Nenhum ativo pôde ser analisado.", "#FF4040"))
-                return
+            if not resultados: self.after(0, lambda: self.stop_log_spinner("Nenhum ativo pôde ser analisado.", "#FF4040")); return
             
             melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)
             
-            if melhores:
-                self.after(0, lambda: self.stop_log_spinner(f"Melhores Ativos ({len(melhores[:5])} de {len(melhores)}):", "#FFD700"))
-                for r in melhores[:5]: # Mostra os 5 melhores
-                    wins_str_parts = [f"WIN: {r['wins'][0]}"]
-                    for mg in range(1, len(r['wins'])):
-                        wins_str_parts.append(f"MG{mg}: {r['wins'][mg]}")
-                    wins_str = " | ".join(wins_str_parts)
-                    
-                    adx_str = f" | ADX: {r['adx']:.2f}" if r.get('adx') is not None else ""
-                    
-                    velas_count = r.get('velas_consecutivas', 0)
-                    velas_str = f" | Velas Repetitivas: {velas_count}" if velas_count >= 5 else ""
-                    
-                    msg = (
-                        f"{r['ativo']} -> {r['assertividade']:.2f}% | {wins_str} | Loss: {r['loss']}{adx_str}{velas_str}"
-                    )
-                    self.after(0, lambda m=msg: self.log_event(m, "#FFD700"))
-
-            else:
-                self.after(0, lambda: self.stop_log_spinner("Nenhum resultado de catalogação.", "#FF8000"))
-
+            self.after(0, lambda: self.stop_log_spinner(f"Melhores Ativos ({len(melhores[:5])} de {len(melhores)}):", "#FFD700"))
+            for r in melhores[:5]:
+                wins_str_parts = [f"W0: {r['wins'][0]}"]
+                for mg in range(1, len(r['wins'])): wins_str_parts.append(f"MG{mg}: {r['wins'][mg]}")
+                wins_str = " | ".join(wins_str_parts)
+                adx_str = f" | ADX: {r['adx']:.2f}" if r.get('adx') is not None else ""
+                velas_count = r.get('velas_consecutivas', 0)
+                velas_str = f" | Velas Repetitivas: {velas_count}" if velas_count >= 4 else ""
+                payout_val = r.get('payout')
+                payout_str = f" | Payout: {payout_val*100:.0f}%" if isinstance(payout_val, float) else ""
+                msg = f"{r['ativo']} -> {r['assertividade']:.2f}%{payout_str} | {wins_str} | Loss: {r['loss']}{adx_str}{velas_str}"
+                self.after(0, lambda m=msg: self.log_event(m, "#FFD700"))
         threading.Thread(target=do_catalog, daemon=True).start()
-
 
     def robot_finished(self):
         self.lbl_robostatus.config(text="Parado", foreground="red")
@@ -1053,68 +1054,54 @@ class BotFullApp(tk.Tk):
         if self.api and self.connected:
             try:
                 saldo = self.api.get_balance()
-                if saldo < 0:
-                    fg = "#FF4040"
-                else:
-                    fg = "#00FF00" if self.theme_mode == "dark" else "#006400"
+                fg = "#FF4040" if saldo < 0 else ("#00FF00" if self.theme_mode == "dark" else "#006400")
                 self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}", fg=fg, bg="#222" if self.theme_mode == "dark" else "#F5F6FA")
-            except Exception:
-                pass
+            except Exception: pass
 
     def start_robot(self):
-        if self.robot_thread and self.robot_thread.is_alive():
-            self.log_event("Robô já está rodando!", "#FF8000")
-            return
-        if not self.api or not self.connected:
-            self.log_event("Conecte-se antes de iniciar o robô.", "#FF4040")
-            return
-        ativos = self.get_selected_ativos() or self.ativos
-        if not ativos:
-            self.log_event("Selecione ao menos um ativo ou atualize a lista.", "#FF8000")
-            return
+        if self.robot_thread and self.robot_thread.is_alive(): self.log_event("Robô já está rodando!", "#FF8000"); return
+        if not self.api or not self.connected: self.log_event("Conecte-se antes de iniciar o robô.", "#FF4040"); return
+        ativos = self.get_selected_ativos()
+        if not ativos: self.log_event("Selecione ao menos um ativo.", "#FF8000"); return
+        
+        self.log_event("Iniciando robô para os seguintes ativos:", "#00BFFF")
+        try:
+            payouts = self.api.get_all_profit()
+            for ativo in ativos:
+                payout_info = payouts.get(ativo, {})
+                payout = payout_info.get('turbo') or payout_info.get('binary')
+                payout_str = f"{payout*100:.0f}%" if isinstance(payout, float) else "N/A"
+                self.log_event(f"-> {ativo} (Payout: {payout_str})", self.get_log_color("#FFFFFF"))
+        except Exception as e:
+            self.log_event(f"Não foi possível obter os payouts atuais: {e}", "#FF8000")
+
         try:
             config = {
-                "valor": float(self.entry_valor.get().replace(",", ".")),
-                "expiracao": int(self.combo_exp.get()),
-                "entradas": int(self.spin_entradas.get()),
-                "soros": int(self.spin_soros.get()),
-                "otc": self.var_otc.get(),
-                "martingale": self.var_martingale.get(),
+                "valor": float(self.entry_valor.get().replace(",", ".")), "expiracao": int(self.combo_exp.get()),
+                "entradas": int(self.spin_entradas.get()), "soros": int(self.spin_soros.get()),
+                "otc": self.var_otc.get(), "martingale": self.var_martingale.get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
-                "adx": self.var_adx.get(),
-                "filtro_velas_consecutivas": self.var_filtro_velas.get(),
+                "adx": self.var_adx.get(), "filtro_velas_consecutivas": self.var_filtro_velas.get(),
                 "stop_lucro": self.var_stop.get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
                 "perda": float(self.entry_stoploss.get().replace(",", ".")) if self.entry_stoploss.get() else 0.0,
                 "ativos": ativos
             }
-        except Exception as e:
-            self.log_event(f"Preencha corretamente as configurações. Erro: {e}", "#FF4040")
-            return
+        except Exception as e: self.log_event(f"Preencha corretamente as configurações. Erro: {e}", "#FF4040"); return
             
         self.robot_stop.clear()
         self.robot_stopped_manual = False
         self.lbl_robostatus.config(text="Operando", foreground="#FFB000")
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.robot = PowerBossRobot(
-            api=self.api,
-            config=config,
-            log_callback=self.log_event,
-            stats_callback=self.update_stats,
-            lucro_callback=self.update_lucro,
-            stop_event=self.robot_stop,
-            sound_callback=self.robot_sound,
-            finish_callback=self.robot_finished,
-            update_saldo_callback=self.app_update_saldo
-        )
-        self.log_event("Robô iniciado! Aguardando próximo ciclo para operar...", "#2DC937")
+        self.robot = PowerBossRobot(api=self.api, config=config, log_callback=self.log_event, stats_callback=self.update_stats,
+            lucro_callback=self.update_lucro, stop_event=self.robot_stop, sound_callback=self.robot_sound,
+            finish_callback=self.robot_finished, update_saldo_callback=self.app_update_saldo)
         self.robot_thread = threading.Thread(target=self.robot.run, daemon=True)
         self.robot_thread.start()
 
     def stop_robot(self):
-        if self.robot_stop:
-            self.robot_stop.set()
+        if self.robot_stop: self.robot_stop.set()
         self.robot_stopped_manual = True
         self.lbl_robostatus.config(text="Parado", foreground="red")
         self.btn_start.config(state="normal")
@@ -1129,13 +1116,9 @@ class BotFullApp(tk.Tk):
 
     def update_lucro(self, valor):
         self.lucro_acumulado_display = valor
-        if valor < 0:
-            cor = "#FF4040"
-        else:
-            cor = "#00FF00" if self.theme_mode == "dark" else "#006400"
+        cor = "#FF4040" if valor < 0 else ("#00FF00" if self.theme_mode == "dark" else "#006400")
         sinal = "" if valor >= 0 else "-"
-        valor_abs = abs(valor)
-        texto = f"R${sinal}{valor_abs:,.2f}".replace('.', ',')
+        texto = f"R${sinal}{abs(valor):,.2f}".replace('.', ',')
         self.lbl_lucro.config(text=texto, foreground=cor)
 
     def reset_lucro(self):
