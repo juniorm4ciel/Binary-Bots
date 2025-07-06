@@ -85,6 +85,7 @@ class IQOptionAPI:
     def get_candles(self, ativo, interval, n, now=None):
         now = now or time.time()
         candles = self.api.get_candles(ativo, interval, n, now)
+        if not candles: return []
         return sorted(candles, key=lambda x: x['from'])
 
     def buy(self, valor, ativo, direcao, exp):
@@ -134,7 +135,6 @@ class IQOptionAPI:
             adx[i] = (adx[i-1]*(period-1) + dx[i])/period
         return float(adx[-2]) if len(adx) >= 2 else float(adx[-1])
 
-# NOVO: Função de direção com filtro de Doji
 def get_direction(candle, use_doji_filter=False, doji_sensitivity_percent=5.0):
     if use_doji_filter:
         body = abs(candle['close'] - candle['open'])
@@ -159,28 +159,17 @@ def traduzir_erro(reason):
         code = ""
         message = str(reason)
 
-    if code == "invalid_credentials" or "wrong credentials" in message.lower():
-        return "Você digitou as credenciais erradas. Por favor, confira seu login e senha."
-    if code == "too_many_attempts" or "too many attempts" in message.lower():
-        return "Muitas tentativas de login. Aguarde alguns minutos antes de tentar novamente."
-    if code == "invalid_request" or "invalid request" in message.lower():
-        return "Requisição inválida. Tente novamente mais tarde."
-    if code == "invalid_login" or "invalid login" in message.lower():
-        return "Login inválido. Por favor, confira seu login."
-    if code == "banned":
-        return "Sua conta foi banida. Entre em contato com o suporte."
-    if code == "not_available" or "not available" in message.lower():
-        return "Serviço da corretora indisponível no momento. Tente novamente mais tarde."
-    if code == "timeout" or "timeout" in message.lower():
-        return "Tempo de conexão esgotado. Verifique sua internet e tente novamente."
-    if "network" in message.lower() or "connection" in message.lower():
-        return "Problema de conexão com a internet ou com a corretora."
-    if code == "account_blocked":
-        return "Sua conta está bloqueada. Entre em contato com o suporte da corretora."
-    if code == "account_not_activated":
-        return "Sua conta não está ativada. Ative a conta para continuar."
-    if message:
-        return f"Erro: {message}"
+    if code == "invalid_credentials" or "wrong credentials" in message.lower(): return "Você digitou as credenciais erradas. Por favor, confira seu login e senha."
+    if code == "too_many_attempts" or "too many attempts" in message.lower(): return "Muitas tentativas de login. Aguarde alguns minutos antes de tentar novamente."
+    if code == "invalid_request" or "invalid request" in message.lower(): return "Requisição inválida. Tente novamente mais tarde."
+    if code == "invalid_login" or "invalid login" in message.lower(): return "Login inválido. Por favor, confira seu login."
+    if code == "banned": return "Sua conta foi banida. Entre em contato com o suporte."
+    if code == "not_available" or "not available" in message.lower(): return "Serviço da corretora indisponível no momento. Tente novamente mais tarde."
+    if code == "timeout" or "timeout" in message.lower(): return "Tempo de conexão esgotado. Verifique sua internet e tente novamente."
+    if "network" in message.lower() or "connection" in message.lower(): return "Problema de conexão com a internet ou com a corretora."
+    if code == "account_blocked": return "Sua conta está bloqueada. Entre em contato com o suporte da corretora."
+    if code == "account_not_activated": return "Sua conta não está ativada. Ative a conta para continuar."
+    if message: return f"Erro: {message}"
     return "Ocorreu um erro desconhecido na corretora."
 
 class PowerBossRobot:
@@ -201,43 +190,35 @@ class PowerBossRobot:
         self.apto_para_operar = {}
         self.last_analysis_time = {ativo: None for ativo in config.get('ativos', [])}
 
-
-    def get_candles(self, ativo, n=10, size=60):
+    def get_candles(self, ativo, n=10, size=60, end_time=None):
         try:
-            return self.api.get_candles(ativo, size, n, time.time())
+            end_time = end_time or time.time()
+            return self.api.get_candles(ativo, size, n, end_time)
         except Exception:
             return []
 
     def buy(self, ativo, valor, direcao, exp):
-        if self.sound_callback:
-            self.sound_callback("entry")
-        
+        if self.sound_callback: self.sound_callback("entry")
         if not self.api or not self.api.connected:
             self.log(f"Operação cancelada em {ativo}: API desconectada.", "#FF4040")
             return None, 0.0
-
         try:
             _, order_id = self.api.buy(valor, ativo, direcao, exp)
             if not order_id:
                 self.log(f"Falha ao enviar ordem para {ativo}. A corretora não retornou um ID.", "#FF4040")
                 return None, 0.0
-            
             max_wait = 120
             check_interval = 0.5
             max_checks = int(max_wait / check_interval)
-            
             for i in range(max_checks):
                 if self.stop_event.is_set():
                     self.log("Verificação de resultado cancelada pelo usuário.", "#FF8000")
                     return None, 0.0
-                
-                try:
-                    status, lucro = self.api.check_win_v4(order_id)
+                try: status, lucro = self.api.check_win_v4(order_id)
                 except Exception as e:
                     self.log(f"Erro ao verificar resultado da ordem: {e}. Tentando novamente...", "#FF8000")
                     time.sleep(check_interval)
                     continue
-
                 if status is not None:
                     if self.update_saldo_callback: self.update_saldo_callback()
                     if status == 'win' or status is True:
@@ -246,26 +227,20 @@ class PowerBossRobot:
                     elif status == 'loose' or status is False:
                         if self.sound_callback: self.sound_callback("loss")
                         return False, lucro
-                    elif status == 'equal':
-                        return None, lucro
+                    elif status == 'equal': return None, lucro
                     else:
                         self.log(f"Status desconhecido retornado: {status}. Finalizando checagem.", "#FF8000")
                         return None, lucro
-                
                 time.sleep(check_interval)
-
             self.log(f"Timeout ao obter resultado da ordem {order_id} em {ativo}!", "#FF4040")
             return None, 0.0
-
         except Exception as e:
             self.log(f"Erro crítico na função de compra: {e}", "#FF4040")
             return None, 0.0
 
-
     def get_consecutive_candles_count(self, ativo):
         candles = self.get_candles(ativo, n=10, size=60)
         if not candles: return 0
-        
         last_direction = None
         count = 0
         for candle in reversed(candles):
@@ -274,10 +249,8 @@ class PowerBossRobot:
             if last_direction is None:
                 last_direction = direction
                 count = 1
-            elif direction == last_direction:
-                count += 1
-            else:
-                break
+            elif direction == last_direction: count += 1
+            else: break
         return count
 
     def run(self):
@@ -300,12 +273,11 @@ class PowerBossRobot:
         prox_soros = None
         
         filtro_loss_ativo = self.config.get('filtro_loss_seguidos', False)
-        qtd_loss_necessarios = self.config.get('qtd_loss_seguidos', 2)
+        qtd_loss_necessarios = self.config.get('qtd_loss_seguidos', 1)
         esperar_novo_loss_apos_win = self.config.get('esperar_novo_loss', False)
         
         self.consecutive_losses = {ativo: 0 for ativo in ativos}
-        initial_apt_status = not filtro_loss_ativo
-        self.apto_para_operar = {ativo: initial_apt_status for ativo in ativos}
+        self.apto_para_operar = {ativo: not filtro_loss_ativo for ativo in ativos}
         self.last_analysis_time = {ativo: None for ativo in ativos}
 
         if filtro_loss_ativo:
@@ -324,59 +296,89 @@ class PowerBossRobot:
 
             minuto_atual = agora.minute
             if minuto_atual % 5 == 0:
-                horario_analise = agora.replace(second=0, microsecond=0)
-                if self.last_analysis_time.get(ativo) == horario_analise:
+                horario_base_ciclo = agora.replace(second=0, microsecond=0)
+                if self.last_analysis_time.get(ativo) == horario_base_ciclo:
                     time.sleep(1)
                     continue
-                self.last_analysis_time[ativo] = horario_analise
+                self.last_analysis_time[ativo] = horario_base_ciclo
+                
+                velas_resultado_necessarias = 1 + mg_nivel_max
+                
+                # Pede um bloco maior de velas para garantir que teremos todos os dados necessários
+                velas_necessarias_api = 5 + velas_resultado_necessarias + 5 + 15 
+                all_candles = self.get_candles(ativo, n=velas_necessarias_api, size=60, end_time=horario_base_ciclo.timestamp())
+                if not all_candles:
+                    self.log(f"Não foi possível obter velas para {ativo}.", "#FF8000")
+                    time.sleep(1)
+                    continue
 
-                velas_necessarias = 5 + mg_nivel_max + 5 
-                candles = self.get_candles(ativo, n=velas_necessarias, size=60)
-                if not candles or len(candles) < 5 + mg_nivel_max + 1:
-                    time.sleep(1)
-                    continue
-                
-                quadrante_analise_passado = candles[-(5 + mg_nivel_max + 5):-(5 + mg_nivel_max)]
-                
-                ultimas_tres_velas_passado = quadrante_analise_passado[-3:]
-                directions_passado = [get_direction(c, use_doji_filter=self.config.get("doji_filter", False)) for c in ultimas_tres_velas_passado]
+                # =================== LÓGICA DE EXTRAÇÃO DE QUADRANTE CORRIGIDA ===================
+                def extrair_quadrante_preciso(timestamp_inicio_quadrante, todas_as_velas):
+                    timestamp_fim_quadrante = timestamp_inicio_quadrante + (5 * 60)
+                    quadrante = [
+                        c for c in todas_as_velas 
+                        if c['from'] >= timestamp_inicio_quadrante and c['from'] < timestamp_fim_quadrante
+                    ]
+                    if len(quadrante) == 5:
+                        return quadrante
+                    return None
+                # ===============================================================================
 
-                if 'doji' in directions_passado or directions_passado.count('call') == directions_passado.count('put'):
-                    time.sleep(1)
-                    continue
-                
-                direcao_sinal_passado = 'put' if directions_passado.count('call') > directions_passado.count('put') else 'call'
-                
-                if filtro_loss_ativo:
-                    vitoria_no_ciclo = False
-                    for mg_check in range(mg_nivel_max + 1):
-                        vela_resultado = candles[-(5 + mg_nivel_max) + mg_check]
-                        if get_direction(vela_resultado, use_doji_filter=self.config.get("doji_filter", False)) == direcao_sinal_passado:
-                            vitoria_no_ciclo = True
-                            break
+                # Análise de Loss (se ativado)
+                if filtro_loss_ativo and not self.apto_para_operar.get(ativo):
+                    # Define os horários do ciclo de loss (o ciclo ANTERIOR ao de entrada)
+                    ts_inicio_resultado_loss = int((horario_base_ciclo - datetime.timedelta(minutes=5)).timestamp())
+                    ts_inicio_analise_loss = int((horario_base_ciclo - datetime.timedelta(minutes=10)).timestamp())
+
+                    q_analise_loss = extrair_quadrante_preciso(ts_inicio_analise_loss, all_candles)
                     
-                    if vitoria_no_ciclo:
-                        if self.consecutive_losses.get(ativo, 0) > 0:
-                            self.log(f"Ciclo de WIN no passado em {ativo}. Sequência de loss zerada.", "#2DC937")
-                        self.consecutive_losses[ativo] = 0
-                    else:
-                        self.consecutive_losses[ativo] = self.consecutive_losses.get(ativo, 0) + 1
-                        self.log(f"Ciclo de LOSS no passado em {ativo}. Total {self.consecutive_losses[ativo]}/{qtd_loss_necessarios} loss.", "#FF4040")
+                    if not q_analise_loss:
+                        self.log(f"Dados do quadrante de análise de loss para {ativo} incompletos. Pulando.", "#FF8000")
+                        time.sleep(1)
+                        continue
+                    
+                    # Extrai as velas de resultado para o ciclo de loss
+                    velas_de_resultado = [c for c in all_candles if c['from'] >= ts_inicio_resultado_loss]
+                    if len(velas_de_resultado) < velas_resultado_necessarias:
+                        self.log(f"Dados das velas de resultado de loss para {ativo} incompletos. Pulando.", "#FF8000")
+                        time.sleep(1)
+                        continue
+                    q_resultado_loss = velas_de_resultado[:velas_resultado_necessarias]
 
-                    if self.consecutive_losses.get(ativo, 0) >= qtd_loss_necessarios:
-                        if not self.apto_para_operar.get(ativo):
+                    ultimas_tres_passado = q_analise_loss[2:5]
+                    directions_passado = [get_direction(c) for c in ultimas_tres_passado]
+
+                    if 'doji' not in directions_passado and directions_passado.count('call') != directions_passado.count('put'):
+                        direcao_sinal_passado = 'put' if directions_passado.count('call') > directions_passado.count('put') else 'call'
+                        vitoria_no_ciclo = any(get_direction(vela_resultado) == direcao_sinal_passado for vela_resultado in q_resultado_loss)
+                        
+                        if vitoria_no_ciclo:
+                            if self.consecutive_losses.get(ativo, 0) > 0: self.log(f"Ciclo de WIN no passado em {ativo}. Sequência de loss zerada.", "#2DC937")
+                            self.consecutive_losses[ativo] = 0
+                            if esperar_novo_loss_apos_win: self.apto_para_operar[ativo] = False
+                        else:
+                            self.consecutive_losses[ativo] += 1
+                            self.log(f"Ciclo de LOSS no passado em {ativo}. Total {self.consecutive_losses[ativo]}/{qtd_loss_necessarios} loss.", "#FF4040")
+
+                        if self.consecutive_losses.get(ativo, 0) >= qtd_loss_necessarios:
                             self.log(f"Condição ATINGIDA! {ativo} está APTO para operar.", "#00FF00")
-                        self.apto_para_operar[ativo] = True
+                            self.apto_para_operar[ativo] = True
                 
                 if not self.apto_para_operar.get(ativo):
                     time.sleep(1)
                     continue
                 
-                self.log(f"[ENTRADA AUTORIZADA] Analisando quadrante atual para {ativo}", "#FFD700")
+                # Análise de Entrada (ciclo atual)
+                ts_inicio_analise_entrada = int((horario_base_ciclo - datetime.timedelta(minutes=5)).timestamp())
+                quadrante_atual = extrair_quadrante_preciso(ts_inicio_analise_entrada, all_candles)
 
-                quadrante_atual = candles[-5:]
-                ultimas_tres_atuais = quadrante_atual[-3:]
-                directions_atuais = [get_direction(c, use_doji_filter=self.config.get("doji_filter", False)) for c in ultimas_tres_atuais]
+                if not quadrante_atual:
+                    self.log(f"Dados do quadrante de ENTRADA para {ativo} incompletos. Pulando.", "#FF8000")
+                    time.sleep(1)
+                    continue
+
+                ultimas_tres_atuais = quadrante_atual[2:5]
+                directions_atuais = [get_direction(c) for c in ultimas_tres_atuais]
 
                 if 'doji' in directions_atuais or directions_atuais.count('call') == directions_atuais.count('put'):
                     self.log(f"Entrada em {ativo} CANCELADA: Sinal atual inválido (doji/empate).", "#FF8000")
@@ -385,13 +387,12 @@ class PowerBossRobot:
 
                 direcao_entrada_real = 'put' if directions_atuais.count('call') > directions_atuais.count('put') else 'call'
 
-                if self.config.get("filtro_velas_consecutivas", False):
-                    if self.get_consecutive_candles_count(ativo) >= 4:
-                        self.log(f"Entrada BLOQUEADA em {ativo} (filtro de velas).", "#FFA500")
-                        time.sleep(1)
-                        continue
+                if self.config.get("filtro_velas_consecutivas", False) and self.get_consecutive_candles_count(ativo) >= 4:
+                    self.log(f"Entrada BLOQUEADA em {ativo} (filtro de velas).", "#FFA500")
+                    time.sleep(1)
+                    continue
                 if self.config.get("adx", False):
-                    adx_val = self.api.get_adx(ativo, period=14, size=60)
+                    adx_val = self.api.get_adx(ativo)
                     if adx_val is not None and adx_val >= 21:
                         self.log(f"Entrada BLOQUEADA em {ativo} (ADX >= 21).", "#FFA500")
                         time.sleep(1)
@@ -435,14 +436,14 @@ class PowerBossRobot:
                         if mg_nivel < mg_nivel_max:
                             self.log(f"LOSS em {ativo} | Indo para Martingale {mg_nivel+1}", "#FF8000")
                             mg_nivel += 1
-                            continue
                         else:
                             self.log(f"LOSS em {ativo} {labelmg} | Perda: {lucro_op:.2f}", "#FF4040")
                             prox_soros = None
                             if filtro_loss_ativo:
-                                self.apto_para_operar[ativo] = False
                                 self.consecutive_losses[ativo] = 0
-                                self.log(f"LOSS no ciclo! O ativo {ativo} aguardará um novo ciclo de loss.", "#FF4040")
+                                if esperar_novo_loss_apos_win:
+                                    self.apto_para_operar[ativo] = False
+                                    self.log(f"LOSS no ciclo! O ativo {ativo} aguardará um novo ciclo de loss.", "#FF4040")
                             break
                 
                 self.stats_callback(self._stats())
@@ -479,9 +480,17 @@ class PowerBossRobot:
         return {'ops': ops, 'wins': wins, 'losses': self.result_stats['losses'], 'taxa': f"{taxa:.1f}%"}
 
 def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1, qtd_loss_seguidos_analise=2, use_doji_filter=False):
-    total_velas_necessarias = minutos + (mg_niveis * 5) + 20 
-    candles = api.get_candles(ativo, 60, total_velas_necessarias)
-    if not candles or len(candles) < 5 + mg_niveis:
+    agora = datetime.datetime.now()
+    minuto_resto = agora.minute % 5
+    end_time_dt = agora - datetime.timedelta(minutes=minuto_resto, seconds=agora.second, microseconds=agora.microsecond)
+    end_time_timestamp = end_time_dt.timestamp()
+
+    velas_resultado_necessarias = 1 + mg_niveis
+    total_velas_necessarias = minutos + (mg_niveis * 5) + 20
+    
+    candles = api.get_candles(ativo, 60, total_velas_necessarias, end_time_timestamp)
+    
+    if not candles or len(candles) < 5 + velas_resultado_necessarias:
         return None
 
     win_niveis = [0] * (mg_niveis + 1)
@@ -507,9 +516,15 @@ def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1, qtd_loss_seguidos_a
                  max_consecutive_count = consecutive_count
 
     ciclos_passados = []
-    for i in range(0, len(candles) - 5 - mg_niveis, 5):
+    
+    for i in range(len(candles) - (5 + velas_resultado_necessarias), -1, -5):
         quadrante_analise = candles[i : i+5]
-        ultimas_tres = quadrante_analise[-3:]
+        quadrante_resultado = candles[i+5 : i+5+velas_resultado_necessarias]
+        
+        if len(quadrante_analise) != 5 or len(quadrante_resultado) != velas_resultado_necessarias:
+            continue
+
+        ultimas_tres = quadrante_analise[2:5]
         directions = [get_direction(c, use_doji_filter=use_doji_filter) for c in ultimas_tres]
 
         if 'doji' in directions or directions.count('call') == directions.count('put'):
@@ -521,11 +536,8 @@ def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1, qtd_loss_seguidos_a
         
         resultado_encontrado = False
         vitoria_de_primeira = False
-        for mg in range(mg_niveis + 1):
-            idx_vela_entrada = i + 5 + mg
-            if idx_vela_entrada >= len(candles): break
-            
-            resultado_vela = get_direction(candles[idx_vela_entrada], use_doji_filter=use_doji_filter)
+        for mg in range(velas_resultado_necessarias):
+            resultado_vela = get_direction(quadrante_resultado[mg], use_doji_filter=use_doji_filter)
             if resultado_vela == 'doji': break
             
             if resultado_vela == direcao_entrada:
@@ -537,6 +549,7 @@ def catalogar_powerboss(api, ativo, minutos=60, mg_niveis=1, qtd_loss_seguidos_a
         if not resultado_encontrado: loss += 1
         ciclos_passados.append({'resultado': 'win' if resultado_encontrado else 'loss', 'win_primeira': vitoria_de_primeira})
 
+    ciclos_passados.reverse()
     for i in range(len(ciclos_passados)):
         if ciclos_passados[i]['resultado'] == 'loss':
             consecutive_loss_counter += 1
@@ -734,7 +747,6 @@ class BotFullApp(tk.Tk):
         self.var_filtro_velas = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Filtro Velas (>=4)", variable=self.var_filtro_velas).grid(row=row, column=1, columnspan=2, padx=4, pady=3, sticky="w")
         
-        # NOVO: Filtro de Doji
         self.var_doji_filter = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_config, text="Filtro de Doji (vela sem corpo)", variable=self.var_doji_filter).grid(row=row, column=3, columnspan=3, padx=4, pady=3, sticky="w")
         row += 1
@@ -804,10 +816,8 @@ class BotFullApp(tk.Tk):
         self.text_log.pack(side="left", fill="both", expand=True, padx=4, pady=4)
 
     def update_check_sons_label(self):
-        if self.sons_ativos.get():
-            self.check_sons.config(text="Sons ativados")
-        else:
-            self.check_sons.config(text="Sons desativados")
+        if self.sons_ativos.get(): self.check_sons.config(text="Sons ativados")
+        else: self.check_sons.config(text="Sons desativados")
 
     def start_log_spinner(self, message_tag, base_message):
         self._log_spinner_running = True
@@ -815,10 +825,8 @@ class BotFullApp(tk.Tk):
         self.text_log.insert("end", f"{base_message} \n", message_tag)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
-        
         def update_spinner(tag, state=0):
-            if not getattr(self, "_log_spinner_running", False):
-                return
+            if not getattr(self, "_log_spinner_running", False): return
             frames = ["⏳", "⌛"]
             spin = frames[state % len(frames)]
             self.text_log.config(state="normal")
@@ -827,11 +835,9 @@ class BotFullApp(tk.Tk):
                 line_end = f"{line_start} lineend"
                 self.text_log.delete(line_start, line_end)
                 self.text_log.insert(line_start, f"{base_message} {spin}", tag)
-            except tk.TclError:
-                return 
+            except tk.TclError: return 
             self.text_log.config(state="disabled")
             self.after(500, update_spinner, tag, state + 1)
-        
         self.after(500, update_spinner, message_tag)
 
     def stop_log_spinner(self, tag, final_message, color="#FFD700"):
@@ -844,21 +850,15 @@ class BotFullApp(tk.Tk):
             self.text_log.insert(line_start, final_message, f"FINAL_{tag}")
             tag_color = self.get_log_color(color)
             self.text_log.tag_config(f"FINAL_{tag}", foreground=tag_color)
-        except tk.TclError:
-            self.log_event(final_message, color)
+        except tk.TclError: self.log_event(final_message, color)
         self.text_log.config(state="disabled")
         self.text_log.see("end")
 
     def save_login(self):
         if self.var_save_login.get():
             with open("login.json", "w") as f:
-                json.dump({
-                    "email": self.entry_email.get(),
-                    "senha": self.entry_senha.get()
-                }, f)
-        else:
-            if os.path.exists("login.json"):
-                os.remove("login.json")
+                json.dump({"email": self.entry_email.get(), "senha": self.entry_senha.get()}, f)
+        elif os.path.exists("login.json"): os.remove("login.json")
 
     def load_login(self):
         if os.path.exists("login.json"):
@@ -881,10 +881,8 @@ class BotFullApp(tk.Tk):
 
     def save_sound_config(self):
         try:
-            with open("sons.json", "w") as f:
-                json.dump(self.sound_files, f)
-        except Exception:
-            pass
+            with open("sons.json", "w") as f: json.dump(self.sound_files, f)
+        except Exception: pass
 
     def load_sound_config(self):
         if os.path.exists("sons.json"):
@@ -892,10 +890,8 @@ class BotFullApp(tk.Tk):
                 with open("sons.json", "r") as f:
                     arquivos = json.load(f)
                     for k in self.sound_files:
-                        if k in arquivos:
-                            self.sound_files[k] = arquivos[k]
-            except Exception:
-                pass
+                        if k in arquivos: self.sound_files[k] = arquivos[k]
+            except Exception: pass
 
     def update_clock(self):
         from datetime import datetime
@@ -923,12 +919,6 @@ class BotFullApp(tk.Tk):
         email = self.entry_email.get().strip()
         senha = self.entry_senha.get().strip()
         conta = self.combo_conta.get().upper()
-        self.api = None
-        self.connected = False
-        self.lbl_status.config(text="Desconectado", foreground="red")
-        self.btn_connect.config(state="normal")
-        self.btn_disconnect.config(state="disabled")
-        self.lbl_saldo.config(text="Saldo: --")
         if not email or not senha:
             self.log_event("Preencha email e senha para conectar.", "#FF4040")
             self.robot_sound("conexao_erro")
@@ -946,10 +936,8 @@ class BotFullApp(tk.Tk):
                 self.btn_connect.config(state="disabled")
                 self.btn_disconnect.config(state="normal")
                 self.lbl_saldo.config(text=f"Saldo: R$ {format_money(saldo)}")
-                if self.theme_mode == "dark":
-                    self.lbl_saldo.config(fg="#00FF00", bg="#222")
-                else:
-                    self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
+                if self.theme_mode == "dark": self.lbl_saldo.config(fg="#00FF00", bg="#222")
+                else: self.lbl_saldo.config(fg="#006400", bg="#F5F6FA")
                 self.log_event(f"Conectado! Saldo: R$ {format_money(saldo)}", "#2DC937")
                 self.robot_sound("conexao")
                 self.save_login()
@@ -976,10 +964,8 @@ class BotFullApp(tk.Tk):
 
     def disconnect_api(self):
         if self.api:
-            try:
-                self.api.disconnect()
-            except Exception:
-                pass
+            try: self.api.disconnect()
+            except Exception: pass
             self.api = None
         self.connected = False
         self.lbl_status.config(text="Desconectado", foreground="red")
@@ -992,11 +978,9 @@ class BotFullApp(tk.Tk):
         self.save_login()
 
     def robot_sound(self, event):
-        if not self.sons_ativos.get():
-            return
+        if not self.sons_ativos.get(): return
         file = self.sound_files.get(event)
-        if not file:
-            file = DEFAULT_SOUNDS.get(event)
+        if not file: file = DEFAULT_SOUNDS.get(event)
         if file and os.path.exists(resource_path(file)):
             play_sound(sound_file=file)
         else:
@@ -1069,8 +1053,7 @@ class BotFullApp(tk.Tk):
         for asset, checkbox in self.asset_checkboxes.items():
             if texto in asset.lower():
                 if not checkbox.winfo_ismapped(): checkbox.pack(anchor="w", padx=5, pady=2)
-            else:
-                checkbox.pack_forget()
+            else: checkbox.pack_forget()
 
     def get_selected_ativos(self):
         return [asset for asset, var in self.asset_vars.items() if var.get()]
@@ -1083,17 +1066,13 @@ class BotFullApp(tk.Tk):
         except Exception: mg_niveis = 1
         try: qtd_loss_analise = int(self.spin_loss_seguidos.get())
         except Exception: qtd_loss_analise = 2
-            
         ativos_analisar = selecionados or self.ativos
         if not ativos_analisar: self.log_event("Nenhum ativo para analisar.", "#FF8000"); return
-        
         resultados = []
         self.start_log_spinner("SPINNER_ASSERT", f"Analisando assertividade de {len(ativos_analisar)} ativo(s)...")
-        
         def do_catalog():
             try: payouts = self.api.get_all_profit()
             except Exception: payouts = {}; self.after(0, lambda: self.log_event("Não foi possível obter os payouts.", "#FF8000"))
-
             for ativo in ativos_analisar:
                 try:
                     res = catalogar_powerboss(self.api, ativo, minutos=60, mg_niveis=mg_niveis, qtd_loss_seguidos_analise=qtd_loss_analise, use_doji_filter=self.var_doji_filter.get())
@@ -1103,11 +1082,8 @@ class BotFullApp(tk.Tk):
                         res['payout'] = payout
                         resultados.append(res)
                 except Exception as e: print(f"Erro catalogando {ativo}: {e}")
-            
             if not resultados: self.after(0, lambda: self.stop_log_spinner("SPINNER_ASSERT", "Nenhum ativo pôde ser analisado.", "#FF4040")); return
-            
             melhores = sorted(resultados, key=lambda x: x['assertividade'], reverse=True)
-            
             self.after(0, lambda: self.stop_log_spinner("SPINNER_ASSERT", f"Melhores Ativos (Análise Pós-{qtd_loss_analise} Loss):", "#FFD700"))
             for r in melhores[:5]:
                 wins_str_parts = [f"W0: {r['wins'][0]}"]
@@ -1115,11 +1091,9 @@ class BotFullApp(tk.Tk):
                 wins_str = " | ".join(wins_str_parts)
                 payout_val = r.get('payout')
                 payout_str = f" | Payout: {payout_val*100:.0f}%" if isinstance(payout_val, float) else ""
-                
                 acerto_pos_loss_str = ""
                 if r['oportunidades_pos_loss'] > 0:
                     acerto_pos_loss_str = f" | Acerto Pós-Loss (1ª Vela): {r['acerto_pos_loss']:.0f}% ({r['wins_pos_loss']}/{r['oportunidades_pos_loss']})"
-                
                 msg = f"{r['ativo']} -> {r['assertividade']:.2f}%{payout_str} | {wins_str} | Loss: {r['loss']}{acerto_pos_loss_str}"
                 self.after(0, lambda m=msg: self.log_event(m, "#FFD700"))
         threading.Thread(target=do_catalog, daemon=True).start()
@@ -1145,7 +1119,6 @@ class BotFullApp(tk.Tk):
         if not self.api or not self.connected: self.log_event("Conecte-se antes de iniciar o robô.", "#FF4040"); return
         ativos = self.get_selected_ativos()
         if not ativos: self.log_event("Selecione ao menos um ativo.", "#FF8000"); return
-        
         self.log_event("Iniciando robô para os seguintes ativos:", "#00BFFF")
         try:
             payouts = self.api.get_all_profit()
@@ -1156,7 +1129,6 @@ class BotFullApp(tk.Tk):
                 self.log_event(f"-> {ativo} (Payout: {payout_str})", self.get_log_color("#FFFFFF"))
         except Exception as e:
             self.log_event(f"Não foi possível obter os payouts atuais: {e}", "#FF8000")
-
         try:
             config = {
                 "valor": float(self.entry_valor.get().replace(",", ".")), "expiracao": int(self.combo_exp.get()),
@@ -1164,7 +1136,7 @@ class BotFullApp(tk.Tk):
                 "otc": self.var_otc.get(), "martingale": self.var_martingale.get(),
                 "mg_niveis": int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1,
                 "adx": self.var_adx.get(), "filtro_velas_consecutivas": self.var_filtro_velas.get(),
-                "doji_filter": self.var_doji_filter.get(), # NOVO
+                "doji_filter": self.var_doji_filter.get(),
                 "stop_lucro": self.var_stop.get(),
                 "lucro": float(self.entry_stopwin.get().replace(",", ".")) if self.entry_stopwin.get() else 0.0,
                 "perda": float(self.entry_stoploss.get().replace(",", ".")) if self.entry_stoploss.get() else 0.0,
@@ -1175,7 +1147,6 @@ class BotFullApp(tk.Tk):
                 "soros_em_mg": self.var_soros_em_mg.get()
             }
         except Exception as e: self.log_event(f"Preencha corretamente as configurações. Erro: {e}", "#FF4040"); return
-            
         self.robot_stop.clear()
         self.robot_stopped_manual = False
         self.lbl_robostatus.config(text="Operando", foreground="#FFB000")
@@ -1211,7 +1182,7 @@ class BotFullApp(tk.Tk):
     def reset_lucro(self):
         self.lucro_acumulado_display = 0.0
         self.update_lucro(self.lucro_acumulado_display)
-        self.log_event("Lucro/Prejuízo zerado manualmente.", "#FFA500")
+        self.log_event("Lucro/Prejuízo zerado manually.", "#FFA500")
 
 if __name__ == "__main__":
     app = BotFullApp()
