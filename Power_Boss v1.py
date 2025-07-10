@@ -265,7 +265,11 @@ class PowerBossRobot:
         self.result_stats = {'ops': 0, 'wins': 0, 'losses': 0}
         self.lucro_callback(self.lucro_acumulado)
         self.stats_callback({'ops': 0, 'wins': 0, 'losses': 0, 'taxa': "0%"})
-        mg_nivel_max = int(self.config.get('mg_niveis', 1))
+        
+        if self.config.get('martingale', False):
+            mg_nivel_max = int(self.config.get('mg_niveis', 1))
+        else:
+            mg_nivel_max = 0
         
         soros_percent = self.config.get('soros', 0)
         soros_ativo = soros_percent > 0
@@ -304,7 +308,6 @@ class PowerBossRobot:
                 
                 velas_resultado_necessarias = 1 + mg_nivel_max
                 
-                # Pede um bloco maior de velas para garantir que teremos todos os dados necessários
                 velas_necessarias_api = 5 + velas_resultado_necessarias + 5 + 15 
                 all_candles = self.get_candles(ativo, n=velas_necessarias_api, size=60, end_time=horario_base_ciclo.timestamp())
                 if not all_candles:
@@ -312,7 +315,6 @@ class PowerBossRobot:
                     time.sleep(1)
                     continue
 
-                # =================== LÓGICA DE EXTRAÇÃO DE QUADRANTE CORRIGIDA ===================
                 def extrair_quadrante_preciso(timestamp_inicio_quadrante, todas_as_velas):
                     timestamp_fim_quadrante = timestamp_inicio_quadrante + (5 * 60)
                     quadrante = [
@@ -322,11 +324,8 @@ class PowerBossRobot:
                     if len(quadrante) == 5:
                         return quadrante
                     return None
-                # ===============================================================================
 
-                # Análise de Loss (se ativado)
                 if filtro_loss_ativo and not self.apto_para_operar.get(ativo):
-                    # Define os horários do ciclo de loss (o ciclo ANTERIOR ao de entrada)
                     ts_inicio_resultado_loss = int((horario_base_ciclo - datetime.timedelta(minutes=5)).timestamp())
                     ts_inicio_analise_loss = int((horario_base_ciclo - datetime.timedelta(minutes=10)).timestamp())
 
@@ -337,7 +336,6 @@ class PowerBossRobot:
                         time.sleep(1)
                         continue
                     
-                    # Extrai as velas de resultado para o ciclo de loss
                     velas_de_resultado = [c for c in all_candles if c['from'] >= ts_inicio_resultado_loss]
                     if len(velas_de_resultado) < velas_resultado_necessarias:
                         self.log(f"Dados das velas de resultado de loss para {ativo} incompletos. Pulando.", "#FF8000")
@@ -368,7 +366,6 @@ class PowerBossRobot:
                     time.sleep(1)
                     continue
                 
-                # Análise de Entrada (ciclo atual)
                 ts_inicio_analise_entrada = int((horario_base_ciclo - datetime.timedelta(minutes=5)).timestamp())
                 quadrante_atual = extrair_quadrante_preciso(ts_inicio_analise_entrada, all_candles)
 
@@ -1062,8 +1059,15 @@ class BotFullApp(tk.Tk):
         if not self.api or not self.connected:
             self.log_event("Conecte-se para analisar assertividade.", "#FF4040"); return
         selecionados = self.get_selected_ativos()
-        try: mg_niveis = int(self.combo_mg_niveis.get()) if self.combo_mg_niveis.get() else 1
-        except Exception: mg_niveis = 1
+
+        if self.var_martingale.get():
+            try:
+                mg_niveis = int(self.combo_mg_niveis.get())
+            except (ValueError, TypeError):
+                mg_niveis = 1
+        else:
+            mg_niveis = 0
+            
         try: qtd_loss_analise = int(self.spin_loss_seguidos.get())
         except Exception: qtd_loss_analise = 2
         ativos_analisar = selecionados or self.ativos
@@ -1091,9 +1095,12 @@ class BotFullApp(tk.Tk):
                 wins_str = " | ".join(wins_str_parts)
                 payout_val = r.get('payout')
                 payout_str = f" | Payout: {payout_val*100:.0f}%" if isinstance(payout_val, float) else ""
+                
+                # Correção: Só mostrar a análise pós-loss se o filtro estiver ativo na UI
                 acerto_pos_loss_str = ""
-                if r['oportunidades_pos_loss'] > 0:
+                if self.var_filtro_loss_seguidos.get() and r['oportunidades_pos_loss'] > 0:
                     acerto_pos_loss_str = f" | Acerto Pós-Loss (1ª Vela): {r['acerto_pos_loss']:.0f}% ({r['wins_pos_loss']}/{r['oportunidades_pos_loss']})"
+                
                 msg = f"{r['ativo']} -> {r['assertividade']:.2f}%{payout_str} | {wins_str} | Loss: {r['loss']}{acerto_pos_loss_str}"
                 self.after(0, lambda m=msg: self.log_event(m, "#FFD700"))
         threading.Thread(target=do_catalog, daemon=True).start()
